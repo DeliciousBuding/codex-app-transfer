@@ -1070,3 +1070,23 @@ en = 'Installer downloaded and started. Follow the installer prompts.'
 zh = ''
 en = 'en'
 
+
+["proxy.notRunning"]
+zh = '未运行'
+en = 'Not running'
+
+["provider.active"]
+zh = '已启用'
+en = 'Active'
+
+["provider.none"]
+zh = '未选择'
+en = 'None selected'
+
+["providers.default"]
+zh = '默认'
+en = 'Default'
+
+["providers.noApiKey"]
+zh = '未填 API Key'
+en = 'API Key missing'

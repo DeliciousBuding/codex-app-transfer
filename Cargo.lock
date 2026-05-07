@@ -906,13 +906,17 @@ dependencies = [
 name = "codex-app-transfer-desktop-app"
 version = "0.1.0"
 dependencies = [
+ "codex-app-transfer-codex-integration",
  "codex-app-transfer-desktop-state",
+ "codex-app-transfer-proxy-runner",
+ "codex-app-transfer-registry",
  "eframe",
  "egui",
  "egui_extras",
  "phf 0.11.3",
  "phf_codegen 0.11.3",
  "serde",
+ "serde_json",
  "toml 0.8.2",
 ]
 

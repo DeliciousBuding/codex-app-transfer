@@ -73,73 +73,74 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// `:root` 默认主题(浅色蓝主基调,与 style.css 第 1-15 行一致)
+    // W3:6 主题色板逐字搬自 style.css `[data-theme-palette="*"]` 块
+    // (第 1751-1853 行)。light 系列 5 个(default/green/orange/gray/white)
+    // 共享白色背景,只变 primary / primary-soft;dark 单独整套深色。
+
+    /// `[data-theme-palette="default"]` 默认蓝
     pub const DEFAULT: Self = Self {
-        app_bg: rgb(0xf6, 0xf8, 0xfb),
+        app_bg: rgb(0xff, 0xff, 0xff),
         surface: rgb(0xff, 0xff, 0xff),
-        soft_surface: rgb(0xee, 0xf3, 0xf9),
-        line: rgb(0xdb, 0xe3, 0xef),
-        text: rgb(0x0f, 0x17, 0x2a),
-        muted: rgb(0x47, 0x55, 0x69),
-        primary: rgb(0x25, 0x63, 0xeb),
-        primary_soft: rgb(0xdb, 0xea, 0xfe),
-        success: rgb(0x11, 0xb5, 0x6d),
-        success_soft: rgb(0xe8, 0xf9, 0xf1),
-        danger: rgb(0xef, 0x38, 0x3f),
-        warning: rgb(0xf0, 0xbd, 0x12),
-        shadow_alpha: 20,
-        radius: 18.0,
+        soft_surface: rgb(0xf7, 0xf8, 0xfb),
+        line: rgb(0xe4, 0xe7, 0xec),
+        text: rgb(0x11, 0x18, 0x27),
+        muted: rgb(0x66, 0x70, 0x85),
+        primary: rgb(0x14, 0x76, 0xff),
+        primary_soft: rgb(0xee, 0xf6, 0xff),
+        success: rgb(0x16, 0xa3, 0x4a),
+        success_soft: rgb(0xec, 0xfd, 0xf3),
+        danger: rgb(0xff, 0x4d, 0x4f),
+        warning: rgb(0xf5, 0x9e, 0x0b),
+        shadow_alpha: 0,
+        radius: 14.0,
         is_dark: false,
     };
 
-    /// 暗色(style.css 第 14-25 行 dark mode 变量)
-    pub const DARK: Self = Self {
-        app_bg: rgb(0x0f, 0x17, 0x2a),
-        surface: rgb(0x17, 0x20, 0x33),
-        soft_surface: rgb(0x1e, 0x29, 0x3b),
-        line: rgb(0x33, 0x41, 0x55),
-        text: rgb(0xf1, 0xf5, 0xf9),
-        muted: rgb(0xcb, 0xd5, 0xe1),
-        primary: rgb(0x3b, 0x82, 0xf6),
-        primary_soft: Color32::from_rgba_premultiplied(59, 130, 246, 46),
-        success: rgb(0x11, 0xb5, 0x6d),
-        success_soft: Color32::from_rgba_premultiplied(17, 181, 109, 41),
-        danger: rgb(0xef, 0x38, 0x3f),
-        warning: rgb(0xf0, 0xbd, 0x12),
-        shadow_alpha: 80,
-        radius: 18.0,
-        is_dark: true,
-    };
-
-    // W2 占位:其它 5 套等 W3 决策点再调精。先复用 DEFAULT/DARK 让切换链通,
-    // 视觉 A/B 时填充各自调色板。
-
-    /// 绿色系(W3 填充)
+    /// `[data-theme-palette="green"]`
     pub const GREEN: Self = Self {
-        primary: rgb(0x10, 0x99, 0x59),
-        primary_soft: rgb(0xd1, 0xfa, 0xe5),
+        primary: rgb(0x1f, 0x9d, 0x55),
+        primary_soft: rgb(0xe4, 0xf6, 0xea),
         ..Self::DEFAULT
     };
-    /// 橙色系(W3 填充)
+
+    /// `[data-theme-palette="orange"]`
     pub const ORANGE: Self = Self {
-        primary: rgb(0xea, 0x77, 0x0a),
-        primary_soft: rgb(0xff, 0xed, 0xd5),
+        primary: rgb(0xf9, 0x73, 0x16),
+        primary_soft: rgb(0xff, 0xf0, 0xe4),
         ..Self::DEFAULT
     };
-    /// 灰系(W3 填充)
+
+    /// `[data-theme-palette="gray"]`
     pub const GRAY: Self = Self {
-        primary: rgb(0x52, 0x52, 0x52),
-        primary_soft: rgb(0xe5, 0xe5, 0xe5),
-        muted: rgb(0x73, 0x73, 0x73),
+        primary: rgb(0x64, 0x74, 0x8b),
+        primary_soft: rgb(0xe8, 0xed, 0xf3),
         ..Self::DEFAULT
     };
-    /// 纯白系(W3 填充)
+
+    /// `[data-theme-palette="white"]` 极简灰主操作色
     pub const WHITE: Self = Self {
-        app_bg: rgb(0xff, 0xff, 0xff),
-        surface: rgb(0xff, 0xff, 0xff),
-        soft_surface: rgb(0xfa, 0xfa, 0xfa),
-        line: rgb(0xe5, 0xe5, 0xe5),
+        primary: rgb(0x94, 0xa3, 0xb8),
+        primary_soft: rgb(0xf1, 0xf5, 0xf9),
         ..Self::DEFAULT
+    };
+
+    /// `[data-theme-palette="dark"]`
+    pub const DARK: Self = Self {
+        app_bg: rgb(0x11, 0x13, 0x18),
+        surface: rgb(0x17, 0x1a, 0x21),
+        soft_surface: rgb(0x20, 0x24, 0x2d),
+        line: rgb(0x2d, 0x34, 0x40),
+        text: rgb(0xf8, 0xfa, 0xfc),
+        muted: rgb(0xaa, 0xb2, 0xc0),
+        primary: rgb(0x60, 0xa5, 0xfa),
+        primary_soft: Color32::from_rgba_premultiplied(96, 165, 250, 46),
+        success: rgb(0x34, 0xd3, 0x99),
+        success_soft: Color32::from_rgba_premultiplied(52, 211, 153, 41),
+        danger: rgb(0xfb, 0x71, 0x85),
+        warning: rgb(0xfb, 0xbf, 0x24),
+        shadow_alpha: 0,
+        radius: 14.0,
+        is_dark: true,
     };
 }
 

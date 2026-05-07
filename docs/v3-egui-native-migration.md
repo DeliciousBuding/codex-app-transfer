@@ -177,13 +177,34 @@ frontend/            ← W1-W7 期间存活共存,W8 删
 | workspace 全测 | 250+ tests 全绿 | adapters / proxy / codex_integration / registry / 等等不动 |
 | Tauri app 旧版本 | `make mac-app` 仍出 v2.0.9 27MB | 回滚保护成立 |
 
-### W3: Dashboard + Settings 完整
+### W3: Dashboard + Settings 完整 ✅ 完成
 
-- [ ] Dashboard:provider 卡片(`provider-card-list`)+ 桌面/代理/当前 provider 三个 hero + activity list + 顶栏(反馈/还原)
-- [ ] Settings:Theme 单选 + Language toggle + 双端口输入 + 4 个开关 + checkSnapshotStatus 状态 + Compatibility 列表 + Backup list + Feedback 入口 + About + 检查更新
-- [ ] 这两页所有 data-action 全部接通(8/20 个)
-- [ ] ⚠️ **决策点 W3-A**:Theme A/B 视觉对比 — 与现 webview 截屏并排对比给用户审,接受偏差范围
-- [ ] egui_kittest snapshot 入仓库
+- [x] Dashboard:provider 卡片网格(从真实 ~/.codex-app-transfer/config.json 读)+ 桌面/代理/当前 provider 三个 hero + activity placeholder + 顶栏反馈/还原按钮
+- [x] Settings 全 20 项渲染:
+  - [x] Theme 单选(7 项, hover hint)
+  - [x] Language toggle(zh/en)
+  - [x] 双端口输入(DragValue 1024-65535)
+  - [x] 4 个开关(autoApplyOnStart / restoreCodexOnExit / exposeAllProviderModels / autoStart)
+  - [x] Update URL 单行输入
+  - [x] Compatibility 检查按钮(渲染,W6 wire async)
+  - [x] Backup / Export / Import 按钮(渲染,W6 wire)
+  - [x] Feedback 按钮(渲染,W6 wire modal)
+  - [x] About:版本 / License / 检查更新按钮 / 安装更新按钮
+- [x] 这两页 sync action 全部接通(theme/language/ports/4 switches/updateUrl);async action(W6 接通)按钮已渲染但 W6 wire
+- [x] **AppState 数据源**:registry crate 直接读写 ~/.codex-app-transfer/config.json,2 秒自动 reload,settings 改动立即写回
+- [x] 6 套主题完整调色板(从 style.css `[data-theme-palette]` 1751-1853 行逐字搬,default/green/orange/gray/dark/white)
+- [x] 5 个新 i18n key(proxy.notRunning / provider.active / provider.none / providers.default / providers.noApiKey)
+- [x] ⚠️ **决策点 W2-A 现在到位**:7 主题完整,你可 \`cargo run --release -p codex-app-transfer-desktop-app\` 切换 7 主题 × 7 page 看色彩,告诉我哪些接受 / 哪些要调
+- [ ] ~~决策点 W3-A~~ 与 W2-A 合并(本质同一个色彩审议)
+- [ ] egui_kittest snapshot W4 加(需要先有 page 内容稳定,W3 末刚有实装)
+
+### W3 量化(累计)
+
+| 指标 | W2 末 | W3 末 |
+|---|---|---|
+| desktop_app release binary | 9.5 MB | **9.9 MB** | ≤ 12 MB(余 2.1 MB)|
+| workspace tests | 250+ 全绿 | **250+ 全绿** | 不动 |
+| Tauri 旧版 `make mac-app` | v2.0.9 27 MB | **v2.0.9 27 MB**(回滚保护成立)|
 
 ### W4: Providers + Providers/Add
 

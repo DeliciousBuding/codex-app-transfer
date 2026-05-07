@@ -8,6 +8,7 @@
 mod app;
 mod i18n;
 mod page;
+mod state;
 mod theme;
 
 use eframe::egui;
