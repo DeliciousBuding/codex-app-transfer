@@ -274,13 +274,57 @@ frontend/            ← W1-W7 期间存活共存,W8 删
 
 ### W7: self-update + 三平台 CI
 
-- [ ] self_update 替代 Tauri updater,沿用 latest.json
-- [ ] xtask mac-bundle / win-msi+nsis / linux-deb / linux-appimage
-- [ ] codesign / notarytool / WiX / RSA 自签 — 沿用现 secrets
-- [ ] release.yml 改 `cargo tauri build` → `cargo bundle` 链路
-- [ ] **不 push 真 release tag**;只验证 PR CI 三平台 build 跑通,artifact 下载手测装能用
-- [ ] ⚠️ **决策点 W7-A**:跨版本自动更新 staging 测(用户旧 v2.0.9 装机 → 触发 self-update → 升到本 PR 出的 v3.0.0-pre);需要你手测确认才发外部
-- [ ] ⚠️ **决策点 W7-B**:三平台 binary 体积达成 §1 表;若任一平台没达成,讨论权衡
+#### W7.1 ✅ — install_update_flow 真实下载 + 启动安装器
+
+- [x] background.rs `install_update_flow(url)`:reqwest 下载安装器到
+  `~/.codex-app-transfer/updates/{filename}`,然后 `opener::open(dest)`
+  让 OS 自动接管(macOS Finder 挂载 .dmg / Windows 启动 .exe / Linux GNOME)
+- [x] 替换 W6.1 的"在浏览器打开下载 URL"占位
+- [x] 不主动退出当前进程 → 用户安装完手动重启;Tauri 旧版自动 quit + relaunch
+  的辅助脚本留给 W7-A 测完根据用户体验决定是否上(目前 .dmg 拖到 Applications
+  的标准 mac 流程已可用)
+
+#### W7.2 — mac bundle(待用户决策包装策略)
+
+- [ ] ⚠️ **决策点 W7-策略**:三平台打包用哪条工具链?候选 ABC:
+  - **A. cargo-bundle**:[crates.io/cargo-bundle](https://crates.io/crates/cargo-bundle)
+    用 `[package.metadata.bundle]` 配 mac/.deb/.appimage,Windows 弱(无 NSIS)
+  - **B. cargo-packager**:Tauri 团队 maintained, 出 .dmg/.app/.msi/.exe/.deb/.appimage 全套,
+    `cargo packager` 命令行,配置 `Cargo.toml [package.metadata.packager]`
+  - **C. 手工拼**:写一个 `xtask bundle-egui` 子命令,Mac 用 `lipo + plutil + codesign`,
+    Win 用 NSIS / WiX 模板,Linux 用 `dpkg-deb + appimagetool`,完全可控但代码量 ~300 行
+- [ ] mac .app:Info.plist 含 CFBundleURLTypes for `cas://` + LSMinimumSystemVersion 11.0
+- [ ] 内嵌 icon.icns(从 src-tauri/icons/icon.icns 沿用)
+- [ ] 内嵌中文字体 subset(W2 已用系统 fallback,bundle 内嵌让 v3.0.0 不依赖系统字体)
+- [ ] codesign 沿用现有 macOS Developer ID 证书(Secret 已配在 release.yml)
+- [ ] notarytool 沿用现有 API key
+
+#### W7.3 — Windows bundle
+
+- [ ] cargo-wix 或 NSIS 模板,产出 `Codex-App-Transfer-x.y.z-Windows-x64-Setup.exe`
+- [ ] registry 注册 `cas://` URL handler(HKCU\Software\Classes\cas)
+- [ ] (可选)WiX .msi,xtask release-bundle 已识别 `-Windows-x64.msi$`
+- [ ] code-sign 沿用现有 RSA 自签 + Authenticode(若有)
+
+#### W7.4 — Linux bundle
+
+- [ ] cargo-deb 产出 `.deb`,`Depends: libgtk-3-0, libayatana-appindicator3-1, libxdo3`
+- [ ] AppImage 用 appimage-builder
+- [ ] `.desktop` 文件含 `MimeType=x-scheme-handler/cas;` for cas:// 注册
+
+#### W7.5 — release.yml 改造
+
+- [ ] 三平台 matrix 从 `cargo tauri build` → 选定的 bundling 工具
+- [ ] xtask release-bundle 输入资产 pattern 已能匹配新文件(检查 platform_patterns)
+- [ ] **不 push 真 release tag**,先在 PR 上 workflow_dispatch 走 dry run
+
+#### 验收
+
+- [ ] 三平台 CI 全绿;artifact 下载手测装能用
+- [ ] ⚠️ **决策点 W7-A**:跨版本自动更新 staging 测(v2.0.9 → v3.0.0-pre);
+  目前 install_update_flow 依赖 latest.json 的 platforms.{plat}.url 指向 .dmg/.exe/.deb/.AppImage,
+  W7.5 改完 release.yml 后会重出 latest.json,届时验证旧版 install-update 路径仍可工作
+- [ ] ⚠️ **决策点 W7-B**:三平台 binary 体积达成 §1 表(mac ≤14MB / win ≤6MB);若未达成讨论权衡
 
 ### W8: cutover
 

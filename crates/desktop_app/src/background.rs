@@ -306,12 +306,24 @@ async fn run_action(
             }
         }
         UiAction::InstallUpdate { url } => {
-            // W7 切到 self_update 真实下载替换 .app;W6 临时:打开浏览器到下载 URL
-            let _ = opener::open(&url);
             let _ = tx.send(BgEvent::Toast {
                 kind: ToastKind::Info,
-                message: "已在浏览器打开下载页(W7 接 self_update 自动替换)".into(),
+                message: "下载更新中…".into(),
             });
+            match install_update_flow(&url).await {
+                Ok(saved) => {
+                    let _ = tx.send(BgEvent::Toast {
+                        kind: ToastKind::Success,
+                        message: format!("✓ 已下载 {saved},正在打开安装器"),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(BgEvent::Toast {
+                        kind: ToastKind::Error,
+                        message: format!("更新失败: {e}"),
+                    });
+                }
+            }
         }
         UiAction::BackupConfig => match backup_config_now() {
             Ok(path) => {
@@ -623,6 +635,54 @@ async fn fetch_latest_json(url: &str) -> Result<(String, Option<String>), String
         .and_then(|x| x.as_str())
         .map(String::from);
     Ok((version, download_url))
+}
+
+/// 下载更新安装器到 ~/.codex-app-transfer/updates/{filename},然后打开。
+///
+/// macOS:`open file.dmg/.pkg` Finder 自动挂载/启动安装器,用户拖到 Applications;
+/// Windows:`start file.exe` 启动 NSIS/WiX 安装器,用户点过完成;
+/// Linux:`xdg-open file.deb/.AppImage` 由 GNOME Software/AppImageLauncher 接管。
+///
+/// 不主动退出当前进程 —— 用户应该可以在安装完成后手动重启。Tauri 旧版自动 quit
+/// 的体验更顺畅但需要更复杂的辅助脚本(W7-A 决策点测完用户实际体验后再增强)。
+async fn install_update_flow(url: &str) -> Result<String, String> {
+    let parsed_url = reqwest::Url::parse(url).map_err(|e| format!("URL 无效: {e}"))?;
+    let filename = parsed_url
+        .path_segments()
+        .and_then(|mut s| s.next_back())
+        .map(|s| s.to_owned())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "无法从 URL 推断文件名".to_owned())?;
+
+    let updates_dir = codex_app_transfer_registry::config_dir()
+        .ok_or_else(|| "config_dir 失败".to_owned())?
+        .join("updates");
+    std::fs::create_dir_all(&updates_dir).map_err(|e| format!("创建 updates 目录失败: {e}"))?;
+    let dest = updates_dir.join(&filename);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(parsed_url)
+        .send()
+        .await
+        .map_err(|e| format!("下载失败: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("下载 HTTP {}", resp.status()));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取下载内容失败: {e}"))?;
+    std::fs::write(&dest, &bytes).map_err(|e| format!("写入安装包失败: {e}"))?;
+
+    // 打开下载完成的安装器(macOS 自动挂载 .dmg / Windows 启动 .exe / Linux GNOME)
+    if let Err(e) = opener::open(&dest) {
+        return Err(format!("文件已下载但启动安装器失败: {e}"));
+    }
+    Ok(dest.display().to_string())
 }
 
 async fn submit_feedback_http(
