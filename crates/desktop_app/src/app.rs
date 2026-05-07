@@ -9,6 +9,7 @@ use crate::background::{Bg, BgEvent, ToastKind, UiAction};
 use crate::i18n::lookup_owned;
 use crate::page::{self, Page};
 use crate::state::AppState;
+use crate::system::{self, CasAction, Tray, TrayUiEvent};
 use crate::theme::{self, ThemeName};
 
 pub struct App {
@@ -16,6 +17,15 @@ pub struct App {
     pub state: AppState,
     pub bg: Bg,
     pub toasts: Vec<Toast>,
+    pub tray: Option<Tray>,
+    /// 上一次推送给 tray 的 provider 列表签名(避免每帧 rebuild_menu)
+    pub last_tray_signature: String,
+    /// 上一次设置的 auto_start 状态(检测变化触发系统调用)
+    pub last_auto_start: Option<bool>,
+    /// 启动时从 argv 接到的 cas:// URL,首帧消化
+    pub pending_cas: Option<String>,
+    /// 用于响应 tray "显示 / 隐藏窗口"
+    pub window_visible: bool,
     last_applied_theme: Option<ThemeName>,
     last_applied_locale: Option<crate::i18n::Locale>,
 }
@@ -27,17 +37,153 @@ pub struct Toast {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, initial_cas: Option<String>) -> Self {
         try_install_system_cjk_font(&cc.egui_ctx);
         let mut bg = Bg::new();
         bg.set_egui_ctx(cc.egui_ctx.clone());
+        // 在 NSApplication 已启动后安装 macOS native menu
+        system::init_macos_app_menu();
+        let tray = Tray::new();
+        let state = AppState::load();
+        // 用启动时配置初始化 last_auto_start,这样首帧不会无故触发系统 launchctl 注册;
+        // 只有用户在 Settings 真正切换 auto_start 时才发起系统调用。
+        let last_auto_start = Some(state.settings.auto_start);
         Self {
             active_page: Page::Dashboard,
-            state: AppState::load(),
+            state,
             bg,
             toasts: Vec::new(),
+            tray,
+            last_tray_signature: String::new(),
+            last_auto_start,
+            pending_cas: initial_cas,
+            window_visible: true,
             last_applied_theme: None,
             last_applied_locale: None,
+        }
+    }
+
+    /// 把 provider 列表签名,变化时重建 tray 菜单。
+    fn maybe_rebuild_tray(&mut self) {
+        let Some(tray) = self.tray.as_mut() else {
+            return;
+        };
+        let active = self.state.active_provider_id.clone().unwrap_or_default();
+        let mut sig = String::with_capacity(256);
+        sig.push_str(&active);
+        sig.push('|');
+        for p in &self.state.providers {
+            sig.push_str(&p.id);
+            sig.push('=');
+            sig.push_str(&p.name);
+            sig.push(';');
+        }
+        if sig == self.last_tray_signature {
+            return;
+        }
+        self.last_tray_signature = sig;
+        let providers: Vec<(String, String, bool)> = self
+            .state
+            .providers
+            .iter()
+            .map(|p| {
+                (
+                    p.id.clone(),
+                    p.name.clone(),
+                    Some(&p.id) == self.state.active_provider_id.as_ref(),
+                )
+            })
+            .collect();
+        tray.rebuild_menu(&providers);
+    }
+
+    fn handle_tray_events(&mut self, ctx: &egui::Context) {
+        let Some(tray) = self.tray.as_ref() else {
+            return;
+        };
+        for ev in tray.poll_events() {
+            match ev {
+                TrayUiEvent::ToggleWindow => {
+                    self.window_visible = !self.window_visible;
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Visible(self.window_visible));
+                    if self.window_visible {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+                    }
+                }
+                TrayUiEvent::ToggleProxy => {
+                    if self.state.proxy_running {
+                        self.bg.dispatch(UiAction::StopProxy);
+                    } else {
+                        self.bg.dispatch(UiAction::StartProxy);
+                    }
+                }
+                TrayUiEvent::SelectProvider(id) => {
+                    self.state.set_default_provider(&id);
+                    self.bg.dispatch(UiAction::ApplyDesktop);
+                }
+                TrayUiEvent::Quit => {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
+    fn handle_initial_cas(&mut self) {
+        let Some(url) = self.pending_cas.take() else {
+            return;
+        };
+        let Some(action) = system::parse_cas_url(&url) else {
+            self.toasts.push(Toast {
+                kind: ToastKind::Warn,
+                message: format!("无法识别的 cas:// URL: {url}"),
+                created_at: Instant::now(),
+            });
+            return;
+        };
+        match action {
+            CasAction::AddProvider {
+                name,
+                base_url,
+                api_key,
+            } => {
+                self.state.form = crate::state::ProviderForm::empty();
+                self.state.form.name = name.unwrap_or_else(|| "New Provider".into());
+                self.state.form.base_url = base_url;
+                self.state.form.api_key = api_key.unwrap_or_default();
+                self.state.nav_to_providers_add = true;
+                self.toasts.push(Toast {
+                    kind: ToastKind::Info,
+                    message: "通过 cas:// 链接预填了新 provider 表单".into(),
+                    created_at: Instant::now(),
+                });
+            }
+            CasAction::ApplyProvider { provider_id } => {
+                self.state.set_default_provider(&provider_id);
+                self.bg.dispatch(UiAction::ApplyDesktop);
+            }
+            CasAction::ProxyStart => self.bg.dispatch(UiAction::StartProxy),
+            CasAction::ProxyStop => self.bg.dispatch(UiAction::StopProxy),
+        }
+    }
+
+    fn sync_auto_launch(&mut self) {
+        let want = self.state.settings.auto_start;
+        if self.last_auto_start == Some(want) {
+            return;
+        }
+        match system::set_auto_launch(want) {
+            Ok(_) => {
+                self.last_auto_start = Some(want);
+            }
+            Err(e) => {
+                self.toasts.push(Toast {
+                    kind: ToastKind::Warn,
+                    message: format!("设置开机自启失败: {e}"),
+                    created_at: Instant::now(),
+                });
+                // 失败也记下来避免循环 toast
+                self.last_auto_start = Some(want);
+            }
         }
     }
 }
@@ -61,6 +207,13 @@ impl eframe::App for App {
 
         // 2. 周期性 reload config.json(检测外部修改)
         self.state.maybe_reload();
+
+        // W6.2: 首帧消化 cas:// argv URL;tray 事件 + provider 列表→tray 同步;
+        // auto-launch 设置变化 → 系统调用
+        self.handle_initial_cas();
+        self.handle_tray_events(ctx);
+        self.maybe_rebuild_tray();
+        self.sync_auto_launch();
 
         // 主题切换检测 → set_style
         let cur_theme = self.state.settings.theme;

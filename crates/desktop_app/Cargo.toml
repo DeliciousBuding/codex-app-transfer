@@ -44,3 +44,9 @@ rfd = "0.15"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# W6.2 系统集成
+tray-icon = "0.23"
+muda = "0.19"
+single-instance = "0.3"
+auto-launch = "0.6"
+urlencoding = "2"

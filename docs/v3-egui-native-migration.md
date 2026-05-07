@@ -257,15 +257,20 @@ frontend/            ← W1-W7 期间存活共存,W8 删
 - [x] cargo fmt --check 过;workspace tests 21 个 suite 全绿;smoke run 2s 无 panic
 - [x] desktop_app release binary **6.6 MB**(W5 末 5.7 → 加 tokio/reqwest/multipart;余 5.4 MB to 12 MB target)
 
-#### W6.2 — 系统集成(剩余)
+#### W6.2 ✅ — 系统集成(代码层全到位)
 
-- [ ] tray-icon:动态 provider 列表 + 主窗口显隐 + Quit
-- [ ] muda macOS menu:Cmd+Q/Cmd+H/Cmd+W/About + 编辑菜单(Cut/Copy/Paste/SelectAll)
-- [ ] cas:// URI scheme 三平台注册
-- [ ] single-instance:第二实例把 cas:// URL 通过 ipc-channel 转发到第一实例
-- [ ] auto-launch:autoStart 设置开关接通
-- [ ] feedbackModal 进阶:rfd 截图上传 + diagnostics 自动注入应用日志(W6.1 已 wire 基础 multipart POST)
-- [ ] ⚠️ **决策点 W6-A**:cas:// 注册流程在三平台手测,需要你各装一份测一次
+- [x] tray-icon 0.23 接通:动态 provider 菜单(签名变化 lazy rebuild)+ "显示/隐藏窗口" + "启动/停止 proxy" + 退出 + 占位单色 icon(W7 替换打包 PNG)
+- [x] muda 0.19 macOS native menu:App submenu(About + Services + Hide/HideOthers/ShowAll + Quit)+ Edit submenu(Undo/Redo/Cut/Copy/Paste/SelectAll)+ Window submenu(Minimize/Maximize/Close)
+- [x] single-instance 0.3:`acquire_single_instance()` 持锁直到进程退出;次实例启动直接 `eprintln!` + `exit(0)`(W6.2 暂不上 IPC URL 转发,W6-A 测完再决定要不要)
+- [x] cas:// URI scheme 解析层完成:`parse_cas_url()` 支持 `cas://providers/add?baseUrl=&name=&apiKey=` / `cas://desktop/apply?provider=` / `cas://proxy/start` / `cas://proxy/stop`,5 个单元测试覆盖
+- [x] argv 启动接入:`cas_url_from_argv()` 取启动参数中的 cas:// URL,首帧消化(预填表单 / 应用 provider / 启停 proxy)
+- [x] auto-launch 0.6:`set_auto_launch()` 包装,Settings auto_start 切换时触发(初始化时记录已读 state 避免首帧无故 launchctl)
+- [x] App 加 Tray + last_tray_signature + last_auto_start + pending_cas + window_visible 字段,update() 每帧 handle_initial_cas / handle_tray_events / maybe_rebuild_tray / sync_auto_launch
+- [x] cargo build / smoke 2s / cargo test --workspace / cargo fmt --check 全过;binary 6.6 → 6.7 MB(目标 ≤12 MB,余 5.3 MB)
+- [ ] ⚠️ **决策点 W6-A**:cas:// 三平台**注册流程**(macOS Info.plist + Windows registry + Linux .desktop)落到 W7 打包阶段,我会在 W7 里加 cargo-bundle / cargo-wix 的 URL handler 配置,然后给你三平台 build 各装一份测 `xdg-open cas://...` / `open cas://...` / `start cas://...` 是否拉起 app + 应用对应 action
+- [ ] feedbackModal 进阶(rfd 截图上传 + diagnostics 自动注入应用日志)放 W6.3 / W7,W6.1 基础 multipart POST 已可用
+- [ ] tray icon 替换正式 PNG(放 W7 打包阶段一起)
+- [ ] cas:// 第二实例 IPC 转发(W6-A 测完根据用户体验决定是否上;若直接 launch 不打开第一实例 OK 就不必)
 
 ### W7: self-update + 三平台 CI
 
