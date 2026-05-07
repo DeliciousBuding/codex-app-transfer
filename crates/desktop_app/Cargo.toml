@@ -10,8 +10,13 @@ authors.workspace = true
 repository.workspace = true
 
 # bin 入口(W2 起步;W7 扩展打包流程)
+# bin name `codex-app-transfer` 同 v2.x Tauri 产物的 binary 名,让
+# 1) /usr/bin/codex-app-transfer 路径同 v2(用户脚本不破)
+# 2) release.yml 现 `dpkg-deb -c | grep usr/bin/codex-app-transfer$` 验证步骤
+#    无需修改即可复用
+# 3) cargo-packager 的 binaries.path 用同名
 [[bin]]
-name = "desktop_app"
+name = "codex-app-transfer"
 path = "src/main.rs"
 
 # W7.2 三平台打包配置(cargo-packager 0.11 — Tauri 团队 maintained)
@@ -32,7 +37,7 @@ authors = ["alysechen <chenmo@alyse.store>"]
 homepage = "https://github.com/Cmochance/codex-app-transfer"
 copyright = "Copyright © 2025 alysechen"
 category = "DeveloperTool"
-binaries = [{ path = "desktop_app", main = true }]
+binaries = [{ path = "codex-app-transfer", main = true }]
 icons = [
     "icons/32x32.png",
     "icons/128x128.png",

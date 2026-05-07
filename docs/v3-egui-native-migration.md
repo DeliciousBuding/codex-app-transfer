@@ -346,12 +346,24 @@ frontend/            ← W1-W7 期间存活共存,W8 删
   - retention 14 天,artifact 名 `egui-{os}`
 - [x] **不**改 release.yml,W2.0 老 release 链路完全不动(并行存活,W8 cutover 时整合)
 
-#### W7.5 — release.yml 改造(放 W8 一起)
+#### W7.5 — release.yml 改造(放 W8 一起;**已识别坑**)
 
-- [ ] 三平台 matrix 从 `cargo tauri build` → `cargo packager` (沿用 egui-bundle-test 的 build 步骤)
-- [ ] xtask release-bundle 资产 pattern 检查:`-Windows-x64-Setup\.exe$` 大概率要改成 `_x64-setup\.exe$` 匹配 cargo-packager 输出
-- [ ] **不 push 真 release tag**,先在 PR 上 workflow_dispatch 走 dry run
-- [ ] 决定放在本 PR 还是 W8 cutover 后再改 release.yml(避免破坏 v2.x 后续小版本发布)
+具体改动清单(W8 一并执行):
+
+1. **build 步骤**:`cargo tauri build` → `cd crates/desktop_app && cargo packager`
+2. **bundle 输出路径**:Tauri 走 `target/<target>/release/bundle/{dmg,deb,appimage,nsis,msi}/*`,cargo-packager 走 **`target/<target>/release/<filename>`**(扁平,无 bundle 子目录),release.yml 现 `BDIR=target/.../release/bundle` 全要改
+3. **二进制名称差异**:Tauri 产 `usr/bin/codex-app-transfer`,cargo-packager 产 **`usr/bin/desktop_app`**(随 [[bin]] name)。`Verify Linux .deb` 步骤的 grep `usr/bin/codex-app-transfer$` 要改 `usr/bin/desktop_app$`,**或** rename [[bin]] name 为 `codex-app-transfer`(更省事,沿用 v2 链接 schema)
+4. **资产命名**:cargo-packager 默认 `Codex App Transfer_3.0.0-pre_aarch64.dmg`(下划线 + 半下划线)。release.yml 的 rename 步骤要适配新 source pattern;xtask release-bundle `platform_patterns()` 正则要从 `-macOS-arm64\.dmg$` 改成 cargo-packager 原始名 **或** 仍走 rename 后归一化的命名
+5. **Apple signing**:cargo-packager 0.11 macos 段支持 `signingIdentity` (env `APPLE_SIGNING_IDENTITY`),与 Tauri 行为一致;notarize 通过 `entitlements` + 外部 `xcrun notarytool` 调用,留 release.yml 现 step 兜底
+6. **签名 entitlements**:已抽到 crates/desktop_app/macos/entitlements.plist,Tauri 旧路径 `../macos/entitlements.plist` 不再适用
+7. **deb depends**:cargo-packager 写到 .deb 的 control 来自 `[package.metadata.packager.deb] depends`,W7.4 配 libgtk-3-0/libayatana-appindicator3-1/libxdo3,**移除 libwebkit2gtk-4.1-0**(Tauri 旧依赖,v3 无 webview)
+8. **NSIS WiX**:cargo-packager 0.11 同时支持 `-f nsis` 和 `-f wix`(.msi),保留 Tauri 双产物
+9. **不 push 真 release tag**:本 PR 内仅 workflow_dispatch dry run 验证,真 v3.0.0 tag 等 W8 cutover 后
+
+**决策建议**:把这些改动放到**单独的一个 commit "release.yml: cutover to cargo-packager"**,保留可 revert 性;W8 同时 bump version 3.0.0-pre → 3.0.0。
+
+- [ ] 实施 W7.5(等 W7-A/B 决策完成后,放 W8 一起)
+- [ ] **不 push 真 release tag**;只 workflow_dispatch dry run
 
 #### 验收
 
