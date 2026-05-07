@@ -132,6 +132,48 @@ pub struct ProviderItem {
     pub has_api_key: bool,
 }
 
+/// 表单编辑器(W4)。 Providers/Add 页用,字段对齐 schema::Provider 的可编辑部分。
+#[derive(Debug, Clone, Default)]
+pub struct ProviderForm {
+    /// 编辑现有 provider 时填 Some(id);新增时为 None
+    pub editing_id: Option<String>,
+    pub name: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub auth_scheme: String, // "bearer" / "x-api-key" / "none"
+    pub api_format: String,  // "openai_chat" / "responses"
+    /// 6 模型 slot 的映射(对齐 schema::ModelSlotKey 顺序)
+    pub mappings: [(String, String); 6],
+    /// 当前 base_url 选项菜单(从 preset 的 baseUrlOptions 来,可空)
+    pub base_url_options: Vec<(String, String)>,
+}
+
+impl ProviderForm {
+    pub fn empty() -> Self {
+        Self {
+            editing_id: None,
+            name: String::new(),
+            base_url: String::new(),
+            api_key: String::new(),
+            auth_scheme: "bearer".into(),
+            api_format: "openai_chat".into(),
+            mappings: default_mapping_slots(),
+            base_url_options: Vec::new(),
+        }
+    }
+}
+
+fn default_mapping_slots() -> [(String, String); 6] {
+    [
+        ("default".into(), String::new()),
+        ("gpt_5_5".into(), String::new()),
+        ("gpt_5_4".into(), String::new()),
+        ("gpt_5_4_mini".into(), String::new()),
+        ("gpt_5_3_codex".into(), String::new()),
+        ("gpt_5_2".into(), String::new()),
+    ]
+}
+
 pub struct AppState {
     pub settings: Settings,
     pub providers: Vec<ProviderItem>,
@@ -140,6 +182,18 @@ pub struct AppState {
     pub config_save_error: Option<String>,
     last_load: Instant,
     pub config_present: bool,
+
+    // ── W4 新增:表单与 UI 临时状态 ──
+    pub form: ProviderForm,
+    pub api_key_visible: bool,
+    /// Some(id) → 渲染 deleteModal 等用户确认
+    pub confirm_delete_id: Option<String>,
+    /// W4: builtin presets cache(启动时 clone 一份,数据量小)
+    pub presets: Vec<Value>,
+    /// 通过 page::providers 设置 → app.rs 检测后切到 Page::ProvidersAdd
+    pub nav_to_providers_add: bool,
+    /// 完成保存或取消后,通过 page::providers_add 设置 → 切回 Page::Providers
+    pub nav_back_to_providers: bool,
 }
 
 impl AppState {
@@ -152,6 +206,12 @@ impl AppState {
             config_save_error: None,
             last_load: Instant::now(),
             config_present: false,
+            form: ProviderForm::empty(),
+            api_key_visible: false,
+            confirm_delete_id: None,
+            presets: codex_app_transfer_registry::builtin_presets().to_vec(),
+            nav_to_providers_add: false,
+            nav_back_to_providers: false,
         };
         s.reload_now();
         s
@@ -279,4 +339,293 @@ impl AppState {
             }
         }
     }
+
+    // ── W4 编辑/新增/删除/重排 provider 操作 ──
+
+    /// 加载现有 provider 数据填进 form,准备进入编辑界面。
+    pub fn load_provider_into_form(&mut self, id: &str) {
+        let v = match self.read_config() {
+            Some(v) => v,
+            None => return,
+        };
+        let arr = match v.get("providers").and_then(|x| x.as_array()) {
+            Some(a) => a,
+            None => return,
+        };
+        let p = match arr
+            .iter()
+            .find(|p| p.get("id").and_then(|i| i.as_str()) == Some(id))
+        {
+            Some(p) => p,
+            None => return,
+        };
+        let mut f = ProviderForm::empty();
+        f.editing_id = Some(id.to_owned());
+        f.name = p
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_owned();
+        f.base_url = p
+            .get("baseUrl")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_owned();
+        f.api_key = p
+            .get("apiKey")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_owned();
+        f.auth_scheme = p
+            .get("authScheme")
+            .and_then(|x| x.as_str())
+            .unwrap_or("bearer")
+            .to_owned();
+        f.api_format = p
+            .get("apiFormat")
+            .and_then(|x| x.as_str())
+            .unwrap_or("openai_chat")
+            .to_owned();
+        if let Some(models) = p.get("models").and_then(|x| x.as_object()) {
+            for (slot, target) in f.mappings.iter_mut() {
+                *target = models
+                    .get(slot.as_str())
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+            }
+        }
+        self.form = f;
+        self.api_key_visible = false;
+    }
+
+    /// 把当前 form 写回 config.json。新增 provider 时生成短 8 字 hex id。
+    pub fn save_form(&mut self) {
+        let mut v = match self.read_config() {
+            Some(v) => v,
+            None => return,
+        };
+        let providers = v
+            .as_object_mut()
+            .and_then(|m| m.get_mut("providers"))
+            .and_then(|p| p.as_array_mut());
+        let providers = match providers {
+            Some(a) => a,
+            None => {
+                v["providers"] = json!([]);
+                v["providers"].as_array_mut().unwrap()
+            }
+        };
+
+        let id = self
+            .form
+            .editing_id
+            .clone()
+            .unwrap_or_else(generate_short_id);
+
+        // 构造 provider object
+        let mut models = serde_json::Map::new();
+        for (slot, target) in &self.form.mappings {
+            models.insert(slot.clone(), Value::String(target.clone()));
+        }
+
+        let mut obj = serde_json::Map::new();
+        obj.insert("id".into(), Value::String(id.clone()));
+        obj.insert("name".into(), Value::String(self.form.name.clone()));
+        obj.insert("baseUrl".into(), Value::String(self.form.base_url.clone()));
+        obj.insert("apiKey".into(), Value::String(self.form.api_key.clone()));
+        obj.insert(
+            "authScheme".into(),
+            Value::String(self.form.auth_scheme.clone()),
+        );
+        obj.insert(
+            "apiFormat".into(),
+            Value::String(self.form.api_format.clone()),
+        );
+        obj.insert("models".into(), Value::Object(models));
+        obj.insert("isBuiltin".into(), Value::Bool(false));
+
+        // upsert
+        if let Some(idx) = providers
+            .iter()
+            .position(|p| p.get("id").and_then(|i| i.as_str()) == Some(&id))
+        {
+            // 编辑:保留原顺序 + 原 extraHeaders/modelCapabilities/requestOptions 等(merge)
+            let merged = if let Value::Object(orig) = providers[idx].clone() {
+                let mut merged = orig.clone();
+                for (k, val) in &obj {
+                    merged.insert(k.clone(), val.clone());
+                }
+                Value::Object(merged)
+            } else {
+                Value::Object(obj)
+            };
+            providers[idx] = merged;
+        } else {
+            providers.push(Value::Object(obj));
+        }
+
+        match save_raw_config(&self.config_path_or_default(), &v) {
+            Ok(_) => {
+                self.config_save_error = None;
+                self.reload_now();
+            }
+            Err(e) => self.config_save_error = Some(format!("save provider 失败: {e}")),
+        }
+    }
+
+    pub fn delete_provider(&mut self, id: &str) {
+        let mut v = match self.read_config() {
+            Some(v) => v,
+            None => return,
+        };
+        if let Some(arr) = v
+            .as_object_mut()
+            .and_then(|m| m.get_mut("providers"))
+            .and_then(|p| p.as_array_mut())
+        {
+            arr.retain(|p| p.get("id").and_then(|i| i.as_str()) != Some(id));
+        }
+        // 如果删除的是默认 provider,清空 activeProvider
+        if v.get("activeProvider").and_then(|x| x.as_str()) == Some(id) {
+            v["activeProvider"] = Value::Null;
+        }
+        match save_raw_config(&self.config_path_or_default(), &v) {
+            Ok(_) => {
+                self.config_save_error = None;
+                self.reload_now();
+            }
+            Err(e) => self.config_save_error = Some(format!("delete 失败: {e}")),
+        }
+    }
+
+    pub fn set_default_provider(&mut self, id: &str) {
+        let mut v = match self.read_config() {
+            Some(v) => v,
+            None => return,
+        };
+        v["activeProvider"] = Value::String(id.to_owned());
+        match save_raw_config(&self.config_path_or_default(), &v) {
+            Ok(_) => {
+                self.config_save_error = None;
+                self.reload_now();
+            }
+            Err(e) => self.config_save_error = Some(format!("set default 失败: {e}")),
+        }
+    }
+
+    /// 上下移动 provider 一格(W4 简化版,W6 可换 drag-drop)。
+    pub fn move_provider(&mut self, id: &str, delta: i32) {
+        let mut v = match self.read_config() {
+            Some(v) => v,
+            None => return,
+        };
+        if let Some(arr) = v
+            .as_object_mut()
+            .and_then(|m| m.get_mut("providers"))
+            .and_then(|p| p.as_array_mut())
+        {
+            if let Some(idx) = arr
+                .iter()
+                .position(|p| p.get("id").and_then(|i| i.as_str()) == Some(id))
+            {
+                let new_idx =
+                    ((idx as i32) + delta).clamp(0, (arr.len() as i32).saturating_sub(1)) as usize;
+                if new_idx != idx {
+                    let item = arr.remove(idx);
+                    arr.insert(new_idx, item);
+                }
+            }
+        }
+        match save_raw_config(&self.config_path_or_default(), &v) {
+            Ok(_) => {
+                self.config_save_error = None;
+                self.reload_now();
+            }
+            Err(e) => self.config_save_error = Some(format!("reorder 失败: {e}")),
+        }
+    }
+
+    /// 用 preset 填充当前 form(用户在 providers/add 页右侧选 preset 后)。
+    pub fn fill_form_from_preset(&mut self, preset: &Value) {
+        let f = &mut self.form;
+        f.editing_id = None;
+        f.name = preset
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_owned();
+        f.base_url = preset
+            .get("baseUrl")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_owned();
+        f.auth_scheme = preset
+            .get("authScheme")
+            .and_then(|x| x.as_str())
+            .unwrap_or("bearer")
+            .to_owned();
+        f.api_format = preset
+            .get("apiFormat")
+            .and_then(|x| x.as_str())
+            .unwrap_or("openai_chat")
+            .to_owned();
+        if let Some(models) = preset.get("models").and_then(|x| x.as_object()) {
+            for (slot, target) in f.mappings.iter_mut() {
+                *target = models
+                    .get(slot.as_str())
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+            }
+        }
+        // baseUrlOptions(部分 preset 多区域 URL)
+        f.base_url_options = preset
+            .get("baseUrlOptions")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|opt| {
+                        let label = opt.get("label").and_then(|x| x.as_str())?.to_owned();
+                        let value = opt.get("value").and_then(|x| x.as_str())?.to_owned();
+                        Some((label, value))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+
+    // ── helpers ──
+
+    fn read_config(&mut self) -> Option<Value> {
+        let path = self.config_path_or_default();
+        if !path.exists() {
+            return Some(json!({
+                "version": "1.0.4",
+                "activeProvider": null,
+                "providers": [],
+                "settings": {}
+            }));
+        }
+        match load_raw_config(&path) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                self.config_save_error = Some(format!("读 config 失败: {e}"));
+                None
+            }
+        }
+    }
+
+    fn config_path_or_default(&self) -> std::path::PathBuf {
+        config_file().unwrap_or_else(|| std::path::PathBuf::from("config.json"))
+    }
+}
+
+fn generate_short_id() -> String {
+    use std::time::SystemTime;
+    let ns = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:08x}", (ns as u32))
 }

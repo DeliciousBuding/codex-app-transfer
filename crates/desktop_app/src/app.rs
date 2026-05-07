@@ -89,8 +89,57 @@ impl eframe::App for App {
 
         // 中心 page
         egui::CentralPanel::default().show(ctx, |ui| {
-            page::render(ui, self.active_page, &mut self.state);
+            page::render(ui, &mut self.active_page, &mut self.state);
         });
+
+        // ── deleteModal(W4 实装第一个 modal,W6 加另两个)──
+        if let Some(id) = self.state.confirm_delete_id.clone() {
+            let provider_name = self
+                .state
+                .providers
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| p.name.clone())
+                .unwrap_or_else(|| id.clone());
+            let mut close = false;
+            let mut do_delete = false;
+            egui::Window::new(lookup_owned(cur_locale, "providers.deleteTitle"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.set_min_width(360.0);
+                    ui.add_space(4.0);
+                    ui.label(format!(
+                        "{} \"{}\"?",
+                        lookup_owned(cur_locale, "providers.deleteMessage"),
+                        provider_name
+                    ));
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(lookup_owned(cur_locale, "common.cancel"))
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button(format!("🗑 {}", lookup_owned(cur_locale, "common.delete")))
+                                .clicked()
+                            {
+                                do_delete = true;
+                            }
+                        });
+                    });
+                });
+            if do_delete {
+                self.state.delete_provider(&id);
+                self.state.confirm_delete_id = None;
+            } else if close {
+                self.state.confirm_delete_id = None;
+            }
+        }
     }
 }
 

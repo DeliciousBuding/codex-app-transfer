@@ -1090,3 +1090,31 @@ en = 'Default'
 ["providers.noApiKey"]
 zh = '未填 API Key'
 en = 'API Key missing'
+
+["providers.cluster"]
+zh = '集群'
+en = 'Cluster'
+
+["providers.authScheme"]
+zh = '认证方式'
+en = 'Auth scheme'
+
+["providers.edit"]
+zh = '编辑提供商'
+en = 'Edit provider'
+
+["providersAdd.formatTitle"]
+zh = 'API 格式'
+en = 'API format'
+
+["common.show"]
+zh = '显示'
+en = 'Show'
+
+["common.hide"]
+zh = '隐藏'
+en = 'Hide'
+
+["presets.use"]
+zh = '使用预设'
+en = 'Use preset'

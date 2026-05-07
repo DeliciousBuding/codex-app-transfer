@@ -1,7 +1,8 @@
 //! Page 路由 + 各 page 实装入口。
 //!
-//! W3 起 page::render 接收 &mut AppState,各 page 直接读 state.settings /
-//! state.providers 并修改 state.settings(然后 state.save_settings)。
+//! W4 起 page::render 接收 `&mut Page`,允许 page 内部跳转(typical:
+//! Providers 页里点 "edit" → providers::render 设 state.nav_to_providers_add,
+//! mod.rs 检测后切到 Page::ProvidersAdd)。
 
 use eframe::egui;
 
@@ -57,16 +58,15 @@ pub mod providers_add;
 pub mod proxy;
 pub mod settings;
 
-/// 占位 render(W4-W5 各 page 替换):标题 + i18n + "TODO Wn"
 pub fn placeholder(ui: &mut egui::Ui, locale: Locale, title_key: &str, todo_label: &str) {
     ui.add_space(8.0);
     ui.heading(crate::i18n::lookup_owned(locale, title_key));
     ui.add_space(4.0);
-    ui.label(format!("(W3 placeholder · 完整实装在 {todo_label})"));
+    ui.label(format!("(placeholder · 完整实装在 {todo_label})"));
 }
 
-pub fn render(ui: &mut egui::Ui, page: Page, state: &mut AppState) {
-    match page {
+pub fn render(ui: &mut egui::Ui, page: &mut Page, state: &mut AppState) {
+    match *page {
         Page::Dashboard => dashboard::render(ui, state),
         Page::Providers => providers::render(ui, state),
         Page::ProvidersAdd => providers_add::render(ui, state),
@@ -74,5 +74,14 @@ pub fn render(ui: &mut egui::Ui, page: Page, state: &mut AppState) {
         Page::Proxy => proxy::render(ui, state),
         Page::Settings => settings::render(ui, state),
         Page::Guide => guide::render(ui, state),
+    }
+    // page-internal nav requests
+    if state.nav_to_providers_add {
+        state.nav_to_providers_add = false;
+        *page = Page::ProvidersAdd;
+    }
+    if state.nav_back_to_providers {
+        state.nav_back_to_providers = false;
+        *page = Page::Providers;
     }
 }

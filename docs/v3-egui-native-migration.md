@@ -206,12 +206,23 @@ frontend/            ← W1-W7 期间存活共存,W8 删
 | workspace tests | 250+ 全绿 | **250+ 全绿** | 不动 |
 | Tauri 旧版 `make mac-app` | v2.0.9 27 MB | **v2.0.9 27 MB**(回滚保护成立)|
 
-### W4: Providers + Providers/Add
+### W4: Providers + Providers/Add ✅ 完成
 
-- [ ] Providers/Add:完整表单 + 高级折叠 + mapping grid(6 slots:default + gpt-5.5/5.4/5.4-mini/5.3-codex/5.2)+ preset 列表 + base_url options + apiKey 显隐
-- [ ] Providers:可重排 provider 列表(rfd drag-drop 替代 SortableJS)+ 启用切换 + 编辑跳转
-- [ ] deleteModal 实装
-- [ ] 这两页所有 action 接通(7/20 累计 15/20)
+- [x] Providers/Add:完整表单 + 高级折叠(API format + auth scheme)+ mapping grid(6 slots: default + gpt-5.5/5.4/5.4-mini/5.3-codex/5.2)+ preset 列表(7 个内置 preset 渲染 + 一键填充)+ base_url options ComboBox(部分 preset 含多区域 URL)+ apiKey 显隐切换
+- [x] Providers:provider 列表(表头 + 行)+ 上下箭头 reorder(替代 W6 drag-drop)+ 启用切换(set default)+ 编辑跳转(load_provider_into_form + nav_to_providers_add)+ 删除入口(经 deleteModal 确认)+ 添加按钮(右上角)
+- [x] **deleteModal 实装**(W6 三 modal 中第一个落地;在 app.rs 用 egui::Window 渲染,confirm_delete_id 触发)
+- [x] AppState 加 ProviderForm + presets cache + 6 个新方法(load_provider_into_form / save_form / delete_provider / set_default_provider / move_provider / fill_form_from_preset)
+- [x] page::render 签名改 \`&mut Page\`,允许 page 内部跳转(state.nav_to_providers_add / nav_back_to_providers 信号)
+- [x] 7 个新 i18n key(providers.cluster / providers.authScheme / providers.edit / providersAdd.formatTitle / common.show / common.hide / presets.use)
+- [x] 累计 15/20 action 接通(W3 8 个 + W4 7 个:add provider / edit / delete / set default / move-up / move-down / save form)。剩 5 个 async / modal action 在 W6:apply-desktop / proxy-start/stop / clear-desktop / open-feedback / install-update / fetch-form-models / test-provider-form / check-update / check-provider-compatibility / backup-config / export-config / import-config(actually count is more,但都属于 W6)
+
+### W4 量化(累计)
+
+| 指标 | W3 末 | **W4 末** | 目标 |
+|---|---|---|---|
+| desktop_app release binary | 9.9 MB | **10 MB** | ≤ 12 MB(余 2 MB)|
+| workspace tests | 250+ 绿 | **250+ 绿** | 不动 |
+| Tauri 旧版 \`make mac-app\` | v2.0.9 27 MB | **v2.0.9 27 MB**(回滚保护成立)|
 
 ### W5: Proxy + Desktop + Guide
 
