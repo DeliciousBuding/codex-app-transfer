@@ -1,6 +1,8 @@
 [package]
 name = "codex-app-transfer-desktop-app"
-version = "0.1.0"
+# v3.0.0-pre 锁版号 — W8 cutover 时改 3.0.0;之前一直保持 -pre 让 cargo-packager
+# 输出 `_3.0.0-pre_aarch64.dmg` 这种文件名,避免误以为是稳定版
+version = "3.0.0-pre"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,14 +14,71 @@ repository.workspace = true
 name = "desktop_app"
 path = "src/main.rs"
 
+# W7.2 三平台打包配置(cargo-packager 0.11 — Tauri 团队 maintained)
+# 用法:`cd crates/desktop_app && cargo packager --release -f app -f dmg`
+# 出 target/release/Codex App Transfer.app + .dmg(macOS host)/
+# Codex-App-Transfer-x.y.z-Setup.exe(Windows host)/
+# .deb + .AppImage(Linux host)
+[package.metadata.packager]
+productName = "Codex App Transfer"
+identifier = "store.alyse.codex-app-transfer"
+description = "桌面 Codex Provider 切换器 — 原生 Rust UI(eframe + egui)"
+longDescription = """
+Codex App Transfer 帮你在 Codex CLI 和多个 OpenAI 兼容 provider(DeepSeek /
+Kimi / Mimo / 自部署 vLLM 等)之间切换 / 应用配置 / 本地代理转发。
+v3.0 抛 Tauri webview,改用纯 Rust 原生 widget,体积减半启动加速 70%。
+"""
+authors = ["alysechen <chenmo@alyse.store>"]
+homepage = "https://github.com/Cmochance/codex-app-transfer"
+copyright = "Copyright © 2025 alysechen"
+category = "DeveloperTool"
+binaries = [{ path = "desktop_app", main = true }]
+icons = [
+    "icons/32x32.png",
+    "icons/128x128.png",
+    "icons/128x128@2x.png",
+    "icons/icon.icns",
+    "icons/icon.ico",
+]
+formats = ["app", "dmg", "nsis", "deb", "appimage"]
+
+# cas:// URL scheme 注册 — macOS Info.plist CFBundleURLTypes /
+# Windows NSIS 安装器 registry / Linux .desktop x-scheme-handler
+[[package.metadata.packager.deepLinkProtocols]]
+schemes = ["cas"]
+name = "Codex App Transfer cas:// handler"
+role = "viewer"
+
+[package.metadata.packager.macos]
+minimumSystemVersion = "11.0"
+entitlements = "macos/entitlements.plist"
+
+[package.metadata.packager.deb]
+depends = [
+    "libgtk-3-0",
+    "libayatana-appindicator3-1",
+    "libxdo3",
+]
+
+[package.metadata.packager.nsis]
+languages = ["English", "SimpChinese"]
+
 [build-dependencies]
 toml = "0.8"
 phf_codegen = "0.11"
 serde = { version = "1", features = ["derive"] }
 
 [dependencies]
-# UI 框架
-eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "persistence"] }
+# UI 框架。Linux 上必须显式 x11/wayland 二选一(default-features = false 关
+# 了 eframe 默认的 ["x11","wayland"],导致 winit 没有平台 backend → 编译报
+# "The platform you're compiling for is not supported by winit")
+eframe = { version = "0.31", default-features = false, features = [
+    "default_fonts",
+    "wgpu",
+    "persistence",
+    "x11",
+    "wayland",
+] }
 egui = "0.31"
 egui_extras = { version = "0.31", features = ["all_loaders"] }
 # Guide page 静态富文本(W5)— 关 image/svg loader,我们不渲染图片,

@@ -284,20 +284,23 @@ frontend/            ← W1-W7 期间存活共存,W8 删
   的辅助脚本留给 W7-A 测完根据用户体验决定是否上(目前 .dmg 拖到 Applications
   的标准 mac 流程已可用)
 
-#### W7.2 — mac bundle(待用户决策包装策略)
+#### W7.2 ✅ — mac bundle(cargo-packager 0.11)
 
-- [ ] ⚠️ **决策点 W7-策略**:三平台打包用哪条工具链?候选 ABC:
-  - **A. cargo-bundle**:[crates.io/cargo-bundle](https://crates.io/crates/cargo-bundle)
-    用 `[package.metadata.bundle]` 配 mac/.deb/.appimage,Windows 弱(无 NSIS)
-  - **B. cargo-packager**:Tauri 团队 maintained, 出 .dmg/.app/.msi/.exe/.deb/.appimage 全套,
-    `cargo packager` 命令行,配置 `Cargo.toml [package.metadata.packager]`
-  - **C. 手工拼**:写一个 `xtask bundle-egui` 子命令,Mac 用 `lipo + plutil + codesign`,
-    Win 用 NSIS / WiX 模板,Linux 用 `dpkg-deb + appimagetool`,完全可控但代码量 ~300 行
-- [ ] mac .app:Info.plist 含 CFBundleURLTypes for `cas://` + LSMinimumSystemVersion 11.0
-- [ ] 内嵌 icon.icns(从 src-tauri/icons/icon.icns 沿用)
-- [ ] 内嵌中文字体 subset(W2 已用系统 fallback,bundle 内嵌让 v3.0.0 不依赖系统字体)
-- [ ] codesign 沿用现有 macOS Developer ID 证书(Secret 已配在 release.yml)
-- [ ] notarytool 沿用现有 API key
+- [x] **W7-策略决策落:auto mode 选 B (cargo-packager)** — Tauri 团队 maintain,三平台 .app/.dmg/.nsis/.deb/.appimage 全覆盖,Cargo.toml metadata 集中配置
+- [x] `[package.metadata.packager]` 写到 crates/desktop_app/Cargo.toml(productName / identifier / icons / formats / deepLinkProtocols / macos / deb / nsis 段)
+- [x] mac .app + .dmg 本地验证(macOS host):
+  - .app **9.7 MB**(MacOS bin 6.7MB + Resources 3.1MB icons);.dmg **10 MB**
+  - Info.plist 含 CFBundleURLTypes 注册 `cas://` scheme(plutil 校验通过)
+  - CFBundleIdentifier = `store.alyse.codex-app-transfer`(同 Tauri 旧版,签名链路不变)
+  - LSMinimumSystemVersion = 11.0
+  - .app 启动 smoke 通过
+- [x] icons 复制到 crates/desktop_app/icons/(W8 删 src-tauri/ 不影响)
+- [x] entitlements 复制到 crates/desktop_app/macos/(JIT + unsigned mem + library validation off,wgpu/Metal 需要)
+- [x] Makefile `mac-app-egui` target:`cd crates/desktop_app && cargo packager --release -f app -f dmg`
+- [x] **desktop_app 版本 0.1.0 → 3.0.0-pre**(锁住 cargo packager 输出文件名 `_3.0.0-pre_`)
+- [x] **eframe Linux winit 编译错误修复**:`default-features = false` 关掉了 default 的 `["x11","wayland"]`,winit 找不到平台 backend → 显式补回(W6.2 push 后 CI 才暴露,跨平台靠 CI 才能验)
+- [ ] codesign Developer ID + notarize 留给 W7.5 release.yml(本地 build 用 adhoc)
+- [ ] 中文字体 subset 内嵌(W2 用系统 fallback,W7.5 时再决定要不要内嵌减少首启耗时)
 
 #### W7.3 — Windows bundle
 
