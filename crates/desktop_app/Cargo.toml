@@ -22,6 +22,9 @@ serde = { version = "1", features = ["derive"] }
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "wgpu", "persistence"] }
 egui = "0.31"
 egui_extras = { version = "0.31", features = ["all_loaders"] }
+# Guide page 静态富文本(W5)— 关 image/svg loader,我们不渲染图片,
+# 留 macros 让 cache 等基本类型可用
+egui_commonmark = { version = "0.20", default-features = false }
 # 静态 phf 表用,build.rs 端 phf_codegen 输出 phf::Map<&str, [&str; 2]>
 phf = "0.11"
 # 共享 state(W1 抽出的 scaffolding)
@@ -30,6 +33,8 @@ codex-app-transfer-desktop-state = { path = "../desktop_state" }
 codex-app-transfer-registry = { path = "../registry" }
 codex-app-transfer-codex-integration = { path = "../codex_integration" }
 codex-app-transfer-proxy-runner = { path = "../proxy_runner" }
+# W5:proxy_telemetry()(Proxy page 实时日志 + stats)
+codex-app-transfer-proxy = { path = "../proxy" }
 # W4-W5 接入(暂注释,W4 起用):
 # codex-app-transfer-admin-api = { path = "../admin_api" }
 # tokio = { version = "1", features = ["sync", "rt-multi-thread"] }

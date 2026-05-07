@@ -1118,3 +1118,11 @@ en = 'Hide'
 ["presets.use"]
 zh = '使用预设'
 en = 'Use preset'
+
+["proxy.log"]
+zh = '日志'
+en = 'Log'
+
+["desktop.restart"]
+zh = '重启 Codex App'
+en = 'Restart Codex App'

@@ -140,6 +140,46 @@ impl eframe::App for App {
                 self.state.confirm_delete_id = None;
             }
         }
+
+        // ── restartReminderModal(W5 渲染骨架;W6 由切换 provider 流程触发)──
+        if self.state.show_restart_reminder {
+            let mut do_now = false;
+            let mut do_later = false;
+            egui::Window::new(lookup_owned(cur_locale, "restartReminder.title"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.set_min_width(420.0);
+                    ui.add_space(4.0);
+                    ui.label(lookup_owned(cur_locale, "restartReminder.body"));
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(lookup_owned(cur_locale, "restartReminder.later"))
+                            .clicked()
+                        {
+                            do_later = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button(format!(
+                                    "▶ {}",
+                                    lookup_owned(cur_locale, "restartReminder.now")
+                                ))
+                                .on_hover_text("W6 wire 重启 Codex App")
+                                .clicked()
+                            {
+                                do_now = true;
+                            }
+                        });
+                    });
+                });
+            if do_now || do_later {
+                self.state.show_restart_reminder = false;
+                // do_now 的真正重启在 W6 wire
+            }
+        }
     }
 }
 

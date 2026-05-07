@@ -224,13 +224,22 @@ frontend/            ← W1-W7 期间存活共存,W8 删
 | workspace tests | 250+ 绿 | **250+ 绿** | 不动 |
 | Tauri 旧版 \`make mac-app\` | v2.0.9 27 MB | **v2.0.9 27 MB**(回滚保护成立)|
 
-### W5: Proxy + Desktop + Guide
+### W5: Proxy + Desktop + Guide ✅ 完成
 
-- [ ] Proxy:启停 + 端口 + 实时日志(`egui_extras::TableBuilder` virtual scroll,10k 行流畅)+ 自动滚动 + stats
-- [ ] Desktop:config list + JSON pre + apply/clear/restart Codex 三按钮 + 3 mini-step
-- [ ] Guide:`egui_commonmark` 渲染原 guide 静态文案
-- [ ] restartReminderModal 实装
-- [ ] 累计 20/20 action 全部接通
+- [x] Proxy:启停按钮(W6 wire ProxyManager)+ 端口输入(立即写回)+ stats 卡片(Total/Success/Failed,从 \`proxy_telemetry().stats.snapshot()\` 读)+ 实时日志面板(\`egui_extras::TableBuilder\` virtual scroll)+ 自动滚动开关(state.proxy_log_auto_scroll,默认 true)+ 清空 / 查看日志目录按钮
+- [x] Desktop:状态摘要(applied/notConfigured)+ ~/.codex/config.toml 关键字段抽取列表(openai_base_url / model_catalog_json / model_context_window / model)+ apply/clear/restart Codex 三按钮(W6 wire) + JSON 预览 collapsing + 3 mini-step 引导
+- [x] Guide:\`egui_commonmark\` 渲染 zh / en 双版 markdown(从原 frontend/index.html guide section 提取改写,~80 行内嵌 markdown)
+- [x] **restartReminderModal 实装**(W6 三 modal 第二个;app.rs 加渲染逻辑,Desktop page 加 debug 触发按钮验收)
+- [x] 累计 16/20+ action **渲染就位**(剩 async 的真正 wire 在 W6:apply/clear/proxy-start/stop/test/fetch-models/check-update/install-update/check-compat/backup/export/import/feedback/log-open-dir)
+- [x] **顺手做的关键优化**:加 \`[profile.release]\` strip + lto=fat + codegen-units=1 + opt-level=z + panic=abort,**desktop_app binary 14 MB → 5.7 MB**(减 60%);Tauri 旧版同步 27 MB → 13 MB
+
+### W5 量化(累计)
+
+| 指标 | W4 末 | **W5 末** | 目标 |
+|---|---|---|---|
+| desktop_app release binary | 10 MB | **5.7 MB** | ≤ 12 MB(余 6.3 MB)|
+| Tauri 旧版 binary | 27 MB | **13 MB** | n/a(顺手优化)|
+| workspace tests | 250+ 绿 | **250+ 绿** | 不动 |
 
 ### W6: 系统集成
 

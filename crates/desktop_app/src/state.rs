@@ -194,6 +194,11 @@ pub struct AppState {
     pub nav_to_providers_add: bool,
     /// 完成保存或取消后,通过 page::providers_add 设置 → 切回 Page::Providers
     pub nav_back_to_providers: bool,
+    // ── W5 新增 ──
+    /// Proxy page 日志面板自动滚动到最新行
+    pub proxy_log_auto_scroll: bool,
+    /// W6 三 modal 第二个:重启 Codex App 提醒(切换 provider 后触发)
+    pub show_restart_reminder: bool,
 }
 
 impl AppState {
@@ -212,6 +217,8 @@ impl AppState {
             presets: codex_app_transfer_registry::builtin_presets().to_vec(),
             nav_to_providers_add: false,
             nav_back_to_providers: false,
+            proxy_log_auto_scroll: true,
+            show_restart_reminder: false,
         };
         s.reload_now();
         s

@@ -908,10 +908,12 @@ version = "0.1.0"
 dependencies = [
  "codex-app-transfer-codex-integration",
  "codex-app-transfer-desktop-state",
+ "codex-app-transfer-proxy",
  "codex-app-transfer-proxy-runner",
  "codex-app-transfer-registry",
  "eframe",
  "egui",
+ "egui_commonmark",
  "egui_extras",
  "phf 0.11.3",
  "phf_codegen 0.11.3",
@@ -1363,7 +1365,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading 0.7.4",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1574,6 +1576,29 @@ dependencies = [
  "web-time",
  "webbrowser",
  "winit",
+]
+
+[[package]]
+name = "egui_commonmark"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4a1e5d9a91b1b7a320c9b7f56d1878416d7c9bab3eaf337b036e0ddfabf58623"
+dependencies = [
+ "egui",
+ "egui_commonmark_backend",
+ "egui_extras",
+ "pulldown-cmark",
+]
+
+[[package]]
+name = "egui_commonmark_backend"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efb41b6833a6aaa99ca5c4f8e75b2410d69a7b3e30148d413f541147404a0dfa"
+dependencies = [
+ "egui",
+ "egui_extras",
+ "pulldown-cmark",
 ]
 
 [[package]]
@@ -4376,6 +4401,17 @@ name = "profiling"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
+
+[[package]]
+name = "pulldown-cmark"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f86ba2052aebccc42cbbb3ed234b8b13ce76f75c3551a303cb2bcffcff12bb14"
+dependencies = [
+ "bitflags 2.11.1",
+ "memchr",
+ "unicase",
+]
 
 [[package]]
 name = "pxfm"

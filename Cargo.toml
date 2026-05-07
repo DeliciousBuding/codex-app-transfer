@@ -24,3 +24,15 @@ rust-version = "1.80"
 license = "MIT"
 authors = ["Codex App Transfer maintainers"]
 repository = "https://github.com/Cmochance/codex-app-transfer"
+
+# v3.0.0 desktop_app release 体积优化(W5 加):
+# - strip:剥 debug symbols(~30% 收益)
+# - lto = "fat":跨 crate 内联,消死代码(~15-20%)
+# - codegen-units = 1:全程序优化最大化(慢一点编但更小)
+# - opt-level "z":最小体积优先于速度(我们的瓶颈是 IO 不是 CPU,牺牲 5% 速度换 10-20% 体积)
+[profile.release]
+strip = "symbols"
+lto = "fat"
+codegen-units = 1
+opt-level = "z"
+panic = "abort"
