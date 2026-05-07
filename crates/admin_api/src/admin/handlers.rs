@@ -41,12 +41,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::proxy_runner::ProxyManager;
+use codex_app_transfer_proxy_runner::ProxyManager;
 
 use super::registry_io::{load as load_registry, public_provider, save as save_registry};
 use super::state::AdminState;
 
-const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// 应用版本号 — 由 bin(src-tauri / 后续 desktop_app)启动时通过
+/// `crate::set_app_version()` 注入。W1 抽离前是 `env!("CARGO_PKG_VERSION")`,
+/// 抽离后 admin_api crate 自己的 0.1.0 不能代表 app 版本,故改为运行期注入。
+static APP_VERSION_CELL: OnceLock<&'static str> = OnceLock::new();
+fn app_version() -> &'static str {
+    APP_VERSION_CELL.get().copied().unwrap_or("0.0.0-unset")
+}
+pub fn set_app_version(v: &'static str) {
+    let _ = APP_VERSION_CELL.set(v);
+}
 const FEEDBACK_WORKER_URL: &str = "https://codex-app-transfer-feedback.alysechencn.workers.dev";
 const ONE_M_CONTEXT_WINDOW: u64 = 1_000_000;
 
@@ -2167,7 +2176,7 @@ fn apply_desktop_target(target: &DesktopConfigTarget) -> Result<Value, String> {
             default_model: &target.default_model,
             model_mappings: Some(&target.model_mappings),
             model_capabilities: Some(&target.model_capabilities),
-            app_version: APP_VERSION,
+            app_version: app_version(),
         },
     )
     .map_err(|e| format!("apply 失败: {e}"))?;
@@ -2386,7 +2395,7 @@ fn system_time_iso_seconds(time: SystemTime) -> String {
 
 fn default_config_value() -> Value {
     json!({
-        "version": APP_VERSION,
+        "version": app_version(),
         "activeProvider": null,
         "gatewayApiKey": null,
         "providers": [],
@@ -2487,7 +2496,7 @@ fn normalize_imported_config(data: &Value) -> Result<Value, String> {
             source_obj
                 .get("version")
                 .cloned()
-                .unwrap_or_else(|| Value::String(APP_VERSION.to_owned())),
+                .unwrap_or_else(|| Value::String(app_version().to_owned())),
         );
     }
 
@@ -2704,7 +2713,7 @@ fn list_config_backups() -> Result<Vec<Value>, String> {
 pub async fn instance_info() -> Json<Value> {
     Json(json!({
         "app": "codex-app-transfer",
-        "version": APP_VERSION,
+        "version": app_version(),
         "pid": std::process::id(),
     }))
 }
@@ -3298,7 +3307,7 @@ pub async fn restart_codex_app() -> impl IntoResponse {
 // ── /api/version ─────────────────────────────────────────────────────
 
 pub async fn version() -> Json<Value> {
-    Json(json!({"version": APP_VERSION}))
+    Json(json!({"version": app_version()}))
 }
 
 // ── /api/proxy/* ─────────────────────────────────────────────────────
@@ -3477,7 +3486,7 @@ pub async fn update_check(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .unwrap_or(APP_VERSION)
+        .unwrap_or(app_version())
         .to_owned();
     let platform = query
         .platform
@@ -3513,7 +3522,7 @@ pub async fn update_install(body: Option<Json<UpdateInstallInput>>) -> impl Into
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
-        .unwrap_or(APP_VERSION)
+        .unwrap_or(app_version())
         .to_owned();
     let platform = input
         .platform
@@ -3620,7 +3629,7 @@ async fn submit_feedback_with_body(
         }
     };
 
-    let mut meta = json!({"app_version": APP_VERSION});
+    let mut meta = json!({"app_version": app_version()});
     if include_diag {
         let active_name = load_registry()
             .ok()
@@ -3944,7 +3953,7 @@ mod tests {
 
     fn config_with_secret() -> Value {
         json!({
-            "version": APP_VERSION,
+            "version": app_version(),
             "activeProvider": "p1",
             "gatewayApiKey": "cas_existing",
             "providers": [{
@@ -4499,7 +4508,7 @@ mod tests {
             .unwrap();
         runtime.block_on(async {
             let Json(payload) = version().await;
-            assert_eq!(payload, json!({"version": APP_VERSION}));
+            assert_eq!(payload, json!({"version": app_version()}));
         });
     }
 

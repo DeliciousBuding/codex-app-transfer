@@ -1,16 +1,18 @@
 // Stage 6:Tauri 自定义 URI scheme `cas://localhost/` → in-process axum,
 // frontend/ 整目录 include_dir 进二进制。frontend 零改动(v1.4 Bootstrap 视觉)。
+// W1 (v3.0.0 迁移):admin / proxy_runner 已抽到独立 crate,本文件只引依赖。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-
-mod admin;
-mod proxy_runner;
 
 use std::sync::Arc;
 
 use axum::body::Body;
 use bytes::Bytes;
-use proxy_runner::ProxyManager;
+use codex_app_transfer_admin_api::{
+    admin::{handlers, registry_io},
+    build_app_router, AdminState,
+};
+use codex_app_transfer_proxy_runner::ProxyManager;
 use std::io::Write;
 
 use tauri::menu::{Menu, MenuBuilder, SubmenuBuilder};
@@ -18,9 +20,11 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::{AppHandle, Manager, RunEvent, Runtime, WindowEvent};
 use tower::ServiceExt;
 
-use admin::{build_app_router, handlers, AdminState};
-
 fn main() {
+    // W1:把 bin 的 CARGO_PKG_VERSION 注入 admin_api,让 /api/version 等
+    // 路由返回的版本号是 app 的(2.0.9),而不是 admin_api crate 自己的 0.1.0。
+    handlers::set_app_version(env!("CARGO_PKG_VERSION"));
+
     let proxy_manager = Arc::new(ProxyManager::new());
     let admin_state = AdminState {
         proxy_manager: proxy_manager.clone(),
@@ -219,7 +223,7 @@ struct TrayProviderEntry {
 }
 
 fn tray_provider_entries() -> Vec<TrayProviderEntry> {
-    let Ok(cfg) = admin::registry_io::load() else {
+    let Ok(cfg) = registry_io::load() else {
         return Vec::new();
     };
     let active_id = cfg.get("activeProvider").and_then(|v| v.as_str());

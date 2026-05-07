@@ -9,8 +9,9 @@ use axum::{
 };
 use include_dir::{include_dir, Dir};
 
-/// frontend/ 目录在编译期被嵌入。路径相对 src-tauri/Cargo.toml 所在目录。
-static FRONTEND: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../frontend");
+/// frontend/ 目录在编译期被嵌入。路径相对 crates/admin_api/Cargo.toml 所在目录
+/// (W1 后多了一级 ..,原 src-tauri/ 在仓根下,现在 crates/admin_api/ 是 crates/ 下的子目录)。
+static FRONTEND: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/../../frontend");
 
 pub async fn serve_static(req: Request) -> Response {
     let path = req.uri().path();

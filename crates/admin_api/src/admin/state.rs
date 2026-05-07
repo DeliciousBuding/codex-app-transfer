@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::proxy_runner::ProxyManager;
+use codex_app_transfer_proxy_runner::ProxyManager;
 
 #[derive(Clone)]
 pub struct AdminState {

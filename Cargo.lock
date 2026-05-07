@@ -639,22 +639,17 @@ name = "codex-app-transfer"
 version = "2.0.9"
 dependencies = [
  "axum",
- "base64 0.22.1",
  "bytes",
- "chrono",
+ "codex-app-transfer-admin-api",
  "codex-app-transfer-codex-integration",
  "codex-app-transfer-proxy",
+ "codex-app-transfer-proxy-runner",
  "codex-app-transfer-registry",
- "getrandom 0.2.17",
- "include_dir",
- "mime_guess",
  "objc2 0.5.2",
  "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
- "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-shell",
@@ -682,6 +677,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-app-transfer-admin-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chrono",
+ "codex-app-transfer-codex-integration",
+ "codex-app-transfer-proxy",
+ "codex-app-transfer-proxy-runner",
+ "codex-app-transfer-registry",
+ "getrandom 0.2.17",
+ "include_dir",
+ "mime_guess",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "codex-app-transfer-codex-integration"
 version = "0.1.0"
 dependencies = [
@@ -691,6 +709,13 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "codex-app-transfer-desktop-state"
+version = "0.1.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -716,6 +741,18 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+]
+
+[[package]]
+name = "codex-app-transfer-proxy-runner"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "codex-app-transfer-proxy",
+ "codex-app-transfer-registry",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

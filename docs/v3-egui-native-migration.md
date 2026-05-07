@@ -142,14 +142,17 @@ frontend/            ← W1-W7 期间存活共存,W8 删
 
 > 每个 W 完成时:更新对应 checkbox + push commit 到 PR + 在 PR comment 给 changelog + 把"决策点"标 ⚠️ 的项**先汇报后动手**。
 
-### W1: 抽 admin_api + desktop_state
+### W1: 抽 admin_api + desktop_state ✅ 完成
 
-- [ ] 新建 `crates/admin_api/`,把 `src-tauri/src/admin/{mod.rs, handlers.rs, registry_io.rs}` 整体搬过来
-- [ ] `crates/admin_api/Cargo.toml` 依赖 axum + serde + 现 4 crate
-- [ ] `src-tauri/src/main.rs` 改成引 `admin_api::build_router`
-- [ ] 新建 `crates/desktop_state/`,定义 `Action` / `Effect` / `Model` 三个核心 enum / struct
-- [ ] workspace test 全绿(54 admin handlers test 不动)
-- [ ] **现 Tauri app `make mac-app` 仍能 build 仍能跑**(回滚保护)
+- [x] 新建 `crates/admin_api/`,把 `src-tauri/src/admin/{mod.rs, handlers.rs, state.rs, static_files.rs, registry_io.rs}` 整体搬过来
+- [x] `crates/admin_api/Cargo.toml` 依赖 axum + serde + 现 4 crate + tower/bytes/include_dir/mime_guess/chrono/reqwest/sha2/base64/getrandom
+- [x] `src-tauri/src/main.rs` 改成引 `admin_api::build_app_router` + `admin::handlers/registry_io` + `proxy_runner::ProxyManager`
+- [x] 新建 `crates/desktop_state/`,定义 `Action` / `Effect` / `Model` 三个核心 enum / struct(W1 占位 scaffolding)
+- [x] **额外抽出 `crates/proxy_runner/`** — ProxyManager 单独成 crate(183 行),admin_api 依赖,后续 desktop_app 也直接用,避免循环依赖
+- [x] **额外动作**:`APP_VERSION` 从 `env!("CARGO_PKG_VERSION")` 改成 `OnceLock<&'static str>` + bin 启动时 `set_app_version()` 注入,11 个 site 全更新
+- [x] workspace test 全绿(257+ tests,所有 admin handler 测试不变)
+- [x] **现 Tauri app `make mac-app` 仍能 build 仍能跑**(已验证:dist/mac binary 27M,version 2.0.9,行为不变)
+- [x] `cargo fmt --check` 通过
 
 ### W2: desktop_app 骨架
 
