@@ -199,6 +199,18 @@ pub struct AppState {
     pub proxy_log_auto_scroll: bool,
     /// W6 三 modal 第二个:重启 Codex App 提醒(切换 provider 后触发)
     pub show_restart_reminder: bool,
+
+    // ── W6 新增:第三 modal feedbackModal + 表单 ──
+    pub show_feedback_modal: bool,
+    pub feedback_title: String,
+    pub feedback_body: String,
+    pub feedback_include_diagnostics: bool,
+    /// fetch_models 异步返回的可用模型列表(下拉提示用)
+    pub available_models: Vec<String>,
+    /// proxy 是否运行(异步事件 ProxyStarted/ProxyStopped 维护)
+    pub proxy_running: bool,
+    /// 检查更新返回的可下载新版本
+    pub update_available: Option<(String, Option<String>)>,
 }
 
 impl AppState {
@@ -219,6 +231,13 @@ impl AppState {
             nav_back_to_providers: false,
             proxy_log_auto_scroll: true,
             show_restart_reminder: false,
+            show_feedback_modal: false,
+            feedback_title: String::new(),
+            feedback_body: String::new(),
+            feedback_include_diagnostics: true,
+            available_models: Vec::new(),
+            proxy_running: false,
+            update_available: None,
         };
         s.reload_now();
         s

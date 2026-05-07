@@ -243,12 +243,28 @@ frontend/            ← W1-W7 期间存活共存,W8 删
 
 ### W6: 系统集成
 
+#### W6.1 ✅ — tokio runtime + 异步 action 全接通
+
+- [x] `crates/desktop_app/src/background.rs` 新建(~600 行):`UiAction` 14 变体 + `BgEvent` 枚举 + `Bg` 结构(Arc<Runtime> + ProxyManager + mpsc unbounded channel + egui::Context)
+- [x] `Bg::dispatch(UiAction)` 非阻塞;后台 task 完成后 `tx.send(BgEvent)` + `ctx.request_repaint()`
+- [x] `drain_into(state, bg)` 主帧调用,把 BgEvent → state 改动 + Toast 队列
+- [x] 14 个 action 全 wire:StartProxy / StopProxy / ApplyDesktop / ClearDesktop / RestartCodex / TestProvider / FetchModels / CheckUpdate / InstallUpdate / BackupConfig / ExportConfig / ImportConfig / SubmitFeedback / OpenLogDir / CopyToClipboard
+- [x] **真实 IO**:apply_active_provider 经 codex_integration::apply_provider(&paths, &cfg)(传引用 + app_version 字段)、restore_codex_state、ProxyManager::start/stop、reqwest 探测 base_url/v1/models、reqwest GET latest.json、reqwest multipart POST 到 feedback worker、备份目录 `~/.codex-app-transfer/backups/config-YYYYMMDD-HHMMSS.json`
+- [x] Toast 队列(4 秒自动消失,4 类 ToastKind:Info/Success/Warn/Error)右下角 Area 渲染
+- [x] feedbackModal 实装(W6 三 modal 第三个):title/body 表单 + diagnostics 开关 + dispatch SubmitFeedback
+- [x] restartReminderModal 真接通 RestartCodex action(已删 W5 占位 debug 按钮的隔离)
+- [x] 7 个 page 全加 `bg: &Bg` 参数,按钮 click 改 `bg.dispatch(UiAction::...)`
+- [x] cargo fmt --check 过;workspace tests 21 个 suite 全绿;smoke run 2s 无 panic
+- [x] desktop_app release binary **6.6 MB**(W5 末 5.7 → 加 tokio/reqwest/multipart;余 5.4 MB to 12 MB target)
+
+#### W6.2 — 系统集成(剩余)
+
 - [ ] tray-icon:动态 provider 列表 + 主窗口显隐 + Quit
 - [ ] muda macOS menu:Cmd+Q/Cmd+H/Cmd+W/About + 编辑菜单(Cut/Copy/Paste/SelectAll)
 - [ ] cas:// URI scheme 三平台注册
 - [ ] single-instance:第二实例把 cas:// URL 通过 ipc-channel 转发到第一实例
 - [ ] auto-launch:autoStart 设置开关接通
-- [ ] feedbackModal 实装(含 rfd 截图上传 + 日志附加 + multipart POST 到 feedback-worker)
+- [ ] feedbackModal 进阶:rfd 截图上传 + diagnostics 自动注入应用日志(W6.1 已 wire 基础 multipart POST)
 - [ ] ⚠️ **决策点 W6-A**:cas:// 注册流程在三平台手测,需要你各装一份测一次
 
 ### W7: self-update + 三平台 CI

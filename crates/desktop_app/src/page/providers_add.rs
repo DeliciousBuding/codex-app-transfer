@@ -7,10 +7,11 @@
 
 use eframe::egui;
 
+use crate::background::{Bg, UiAction};
 use crate::i18n::lookup_owned;
 use crate::state::AppState;
 
-pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
+pub fn render(ui: &mut egui::Ui, state: &mut AppState, bg: &Bg) {
     let locale = state.settings.language;
     let editing = state.form.editing_id.is_some();
 
@@ -30,7 +31,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
                     ui.set_min_width(560.0);
-                    render_form(ui, state, locale);
+                    render_form(ui, state, locale, bg);
                 });
                 ui.add_space(20.0);
                 ui.vertical(|ui| {
@@ -41,7 +42,7 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
         });
 }
 
-fn render_form(ui: &mut egui::Ui, state: &mut AppState, locale: crate::i18n::Locale) {
+fn render_form(ui: &mut egui::Ui, state: &mut AppState, locale: crate::i18n::Locale, bg: &Bg) {
     ui.label(lookup_owned(locale, "providers.name"));
     ui.add(
         egui::TextEdit::singleline(&mut state.form.name)
@@ -160,9 +161,23 @@ fn render_form(ui: &mut egui::Ui, state: &mut AppState, locale: crate::i18n::Loc
         });
     ui.add_space(8.0);
 
-    let _ = ui
+    if ui
         .button(format!("☁ {}", lookup_owned(locale, "models.fetch")))
-        .on_hover_text("W6: tokio runtime + GET <baseUrl>/v1/models");
+        .clicked()
+    {
+        bg.dispatch(UiAction::FetchModels {
+            base_url: state.form.base_url.clone(),
+            api_key: state.form.api_key.clone(),
+        });
+    }
+    if !state.available_models.is_empty() {
+        ui.add_space(4.0);
+        ui.weak(format!(
+            "{}: {}",
+            lookup_owned(locale, "models.fetchedHint"),
+            state.available_models.join(", ")
+        ));
+    }
 
     ui.add_space(20.0);
     ui.separator();
@@ -171,10 +186,11 @@ fn render_form(ui: &mut egui::Ui, state: &mut AppState, locale: crate::i18n::Loc
     ui.horizontal(|ui| {
         if ui
             .button(format!("▶ {}", lookup_owned(locale, "providers.enable")))
-            .on_hover_text("W6 起 wire codex_integration::apply_to_codex 同步链路")
             .clicked()
         {
             state.save_form();
+            // 启用 = save + apply Codex(异步)
+            bg.dispatch(UiAction::ApplyDesktop);
             state.nav_back_to_providers = true;
         }
         if ui.button(lookup_owned(locale, "common.saveOnly")).clicked() {

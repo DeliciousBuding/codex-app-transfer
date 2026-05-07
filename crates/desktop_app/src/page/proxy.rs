@@ -6,10 +6,11 @@
 
 use eframe::egui;
 
+use crate::background::{Bg, UiAction};
 use crate::i18n::lookup_owned;
 use crate::state::AppState;
 
-pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
+pub fn render(ui: &mut egui::Ui, state: &mut AppState, bg: &Bg) {
     let locale = state.settings.language;
 
     egui::ScrollArea::vertical()
@@ -22,12 +23,19 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             ui.add_space(20.0);
 
             ui.horizontal(|ui| {
-                let _ = ui
-                    .button(format!("▶ {}", lookup_owned(locale, "proxy.start")))
-                    .on_hover_text("W6 wire ProxyManager.start(port).await");
-                let _ = ui
+                if !state.proxy_running {
+                    if ui
+                        .button(format!("▶ {}", lookup_owned(locale, "proxy.start")))
+                        .clicked()
+                    {
+                        bg.dispatch(UiAction::StartProxy);
+                    }
+                } else if ui
                     .button(format!("⏹ {}", lookup_owned(locale, "proxy.stop")))
-                    .on_hover_text("W6 wire ProxyManager.stop()");
+                    .clicked()
+                {
+                    bg.dispatch(UiAction::StopProxy);
+                }
                 ui.add_space(20.0);
                 ui.label(lookup_owned(locale, "settings.proxyPort"));
                 let mut p = state.settings.proxy_port;
@@ -76,9 +84,9 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 if ui.button(lookup_owned(locale, "proxy.clearLog")).clicked() {
                     codex_app_transfer_proxy::proxy_telemetry().logs.clear();
                 }
-                let _ = ui
-                    .button(lookup_owned(locale, "proxy.viewLog"))
-                    .on_hover_text("W6 wire opener::open(proxy_log_dir)");
+                if ui.button(lookup_owned(locale, "proxy.viewLog")).clicked() {
+                    bg.dispatch(UiAction::OpenLogDir);
+                }
             });
             ui.add_space(6.0);
 

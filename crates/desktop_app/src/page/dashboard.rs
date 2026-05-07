@@ -6,10 +6,11 @@
 
 use eframe::egui;
 
+use crate::background::{Bg, UiAction};
 use crate::i18n::lookup_owned;
 use crate::state::AppState;
 
-pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
+pub fn render(ui: &mut egui::Ui, state: &mut AppState, bg: &Bg) {
     let locale = state.settings.language;
     // 把所有依赖 state 的判定先算掉,避免与下面 &state 借用冲突
     let codex_applied = cfg_applied_hint(state);
@@ -59,14 +60,32 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
 
             ui.add_space(16.0);
 
-            // 行动按钮
+            // 行动按钮(W6 wire)
             ui.horizontal(|ui| {
-                let _ = ui.button(format!(
-                    "✨ {}",
-                    lookup_owned(locale, "dashboard.configureDesktop")
-                ));
+                if ui
+                    .button(format!(
+                        "✨ {}",
+                        lookup_owned(locale, "dashboard.configureDesktop")
+                    ))
+                    .clicked()
+                {
+                    state.nav_to_providers_add = true;
+                    state.form = crate::state::ProviderForm::empty();
+                }
                 ui.add_space(4.0);
-                let _ = ui.button(format!("▶ {}", lookup_owned(locale, "proxy.start")));
+                if !state.proxy_running {
+                    if ui
+                        .button(format!("▶ {}", lookup_owned(locale, "proxy.start")))
+                        .clicked()
+                    {
+                        bg.dispatch(UiAction::StartProxy);
+                    }
+                } else if ui
+                    .button(format!("⏹ {}", lookup_owned(locale, "proxy.stop")))
+                    .clicked()
+                {
+                    bg.dispatch(UiAction::StopProxy);
+                }
                 ui.add_space(4.0);
                 let _ = ui.button(format!(
                     "↔ {}",

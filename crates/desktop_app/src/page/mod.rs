@@ -6,6 +6,7 @@
 
 use eframe::egui;
 
+use crate::background::Bg;
 use crate::i18n::Locale;
 use crate::state::AppState;
 
@@ -65,17 +66,16 @@ pub fn placeholder(ui: &mut egui::Ui, locale: Locale, title_key: &str, todo_labe
     ui.label(format!("(placeholder · 完整实装在 {todo_label})"));
 }
 
-pub fn render(ui: &mut egui::Ui, page: &mut Page, state: &mut AppState) {
+pub fn render(ui: &mut egui::Ui, page: &mut Page, state: &mut AppState, bg: &Bg) {
     match *page {
-        Page::Dashboard => dashboard::render(ui, state),
+        Page::Dashboard => dashboard::render(ui, state, bg),
         Page::Providers => providers::render(ui, state),
-        Page::ProvidersAdd => providers_add::render(ui, state),
-        Page::Desktop => desktop::render(ui, state),
-        Page::Proxy => proxy::render(ui, state),
-        Page::Settings => settings::render(ui, state),
+        Page::ProvidersAdd => providers_add::render(ui, state, bg),
+        Page::Desktop => desktop::render(ui, state, bg),
+        Page::Proxy => proxy::render(ui, state, bg),
+        Page::Settings => settings::render(ui, state, bg),
         Page::Guide => guide::render(ui, state),
     }
-    // page-internal nav requests
     if state.nav_to_providers_add {
         state.nav_to_providers_add = false;
         *page = Page::ProvidersAdd;

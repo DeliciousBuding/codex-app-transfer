@@ -11,11 +11,12 @@
 
 use eframe::egui;
 
+use crate::background::{Bg, UiAction};
 use crate::i18n::{lookup_owned, Locale};
 use crate::state::AppState;
 use crate::theme::ThemeName;
 
-pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
+pub fn render(ui: &mut egui::Ui, state: &mut AppState, bg: &Bg) {
     let locale = state.settings.language;
     let mut dirty = false;
 
@@ -151,23 +152,34 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             ui.separator();
             ui.add_space(12.0);
 
-            // ── 第三方兼容性(W6 async wire)──
+            // ── 第三方兼容性(W6 wire)──
             section_with_hint(
                 ui,
                 locale,
                 "settings.thirdPartyCompat",
                 "settings.thirdPartyCompatHint",
                 |ui| {
-                    let _ = ui
+                    if ui
                         .button(format!(
                             "✓ {}",
                             lookup_owned(locale, "settings.checkCompatibility")
                         ))
-                        .on_hover_text("W6: tokio runtime 接 admin_api::providers/compatibility");
+                        .clicked()
+                    {
+                        // W6: 串行 test_provider over each;暂以 toast 提示
+                        // (compat 矩阵 UI 留给后续 commit 增强)
+                        for p in &state.providers {
+                            bg.dispatch(UiAction::TestProvider {
+                                base_url: p.base_url.clone(),
+                                api_key: String::new(), // 空 key 让 401 也能反映 endpoint 可达
+                                model: p.default_model.clone(),
+                            });
+                        }
+                    }
                 },
             );
 
-            // ── 配置备份(W6 async wire)──
+            // ── 配置备份(W6 wire)──
             section_with_hint(
                 ui,
                 locale,
@@ -175,9 +187,24 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 "settings.configBackupHint",
                 |ui| {
                     ui.horizontal(|ui| {
-                        let _ = ui.button(lookup_owned(locale, "settings.backupNow"));
-                        let _ = ui.button(lookup_owned(locale, "settings.exportConfig"));
-                        let _ = ui.button(lookup_owned(locale, "settings.importConfig"));
+                        if ui
+                            .button(lookup_owned(locale, "settings.backupNow"))
+                            .clicked()
+                        {
+                            bg.dispatch(UiAction::BackupConfig);
+                        }
+                        if ui
+                            .button(lookup_owned(locale, "settings.exportConfig"))
+                            .clicked()
+                        {
+                            bg.dispatch(UiAction::ExportConfig);
+                        }
+                        if ui
+                            .button(lookup_owned(locale, "settings.importConfig"))
+                            .clicked()
+                        {
+                            bg.dispatch(UiAction::ImportConfig);
+                        }
                     });
                 },
             );
@@ -189,7 +216,12 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
                 "settings.feedback",
                 "settings.feedbackHint",
                 |ui| {
-                    let _ = ui.button(lookup_owned(locale, "settings.feedbackOpen"));
+                    if ui
+                        .button(lookup_owned(locale, "settings.feedbackOpen"))
+                        .clicked()
+                    {
+                        state.show_feedback_modal = true;
+                    }
                 },
             );
 
@@ -208,8 +240,25 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             row(ui, lookup_owned(locale, "settings.license"), "MIT License");
             ui.horizontal(|ui| {
                 ui.label(lookup_owned(locale, "settings.checkUpdate"));
-                let _ = ui.button(lookup_owned(locale, "settings.checkUpdate"));
-                let _ = ui.button(lookup_owned(locale, "settings.installUpdate"));
+                if ui
+                    .button(lookup_owned(locale, "settings.checkUpdate"))
+                    .clicked()
+                {
+                    bg.dispatch(UiAction::CheckUpdate);
+                }
+                if let Some((ver, url)) = state.update_available.clone() {
+                    if ui
+                        .button(format!(
+                            "{} → {ver}",
+                            lookup_owned(locale, "settings.installUpdate")
+                        ))
+                        .clicked()
+                    {
+                        bg.dispatch(UiAction::InstallUpdate {
+                            url: url.unwrap_or_default(),
+                        });
+                    }
+                }
             });
 
             ui.add_space(20.0);

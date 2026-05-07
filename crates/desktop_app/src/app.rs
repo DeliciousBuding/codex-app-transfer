@@ -1,8 +1,11 @@
-//! eframe::App 主体。W3:接入 AppState(读 ~/.codex-app-transfer/config.json),
-//! 主题 / locale 都从 settings 读;Dashboard 与 Settings page 接通真实数据。
+//! eframe::App 主体。W3:AppState 接 ~/.codex-app-transfer/config.json。
+//! W6:接 tokio runtime + 后台 async action,Toast 队列,顶栏反馈/还原 wire。
+
+use std::time::{Duration, Instant};
 
 use eframe::egui;
 
+use crate::background::{Bg, BgEvent, ToastKind, UiAction};
 use crate::i18n::lookup_owned;
 use crate::page::{self, Page};
 use crate::state::AppState;
@@ -11,16 +14,28 @@ use crate::theme::{self, ThemeName};
 pub struct App {
     pub active_page: Page,
     pub state: AppState,
+    pub bg: Bg,
+    pub toasts: Vec<Toast>,
     last_applied_theme: Option<ThemeName>,
     last_applied_locale: Option<crate::i18n::Locale>,
+}
+
+pub struct Toast {
+    pub kind: ToastKind,
+    pub message: String,
+    pub created_at: Instant,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         try_install_system_cjk_font(&cc.egui_ctx);
+        let mut bg = Bg::new();
+        bg.set_egui_ctx(cc.egui_ctx.clone());
         Self {
             active_page: Page::Dashboard,
             state: AppState::load(),
+            bg,
+            toasts: Vec::new(),
             last_applied_theme: None,
             last_applied_locale: None,
         }
@@ -29,7 +44,22 @@ impl App {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // 周期性 reload config.json(检测外部修改)
+        // 1. 处理 BgEvent → 更新 state + 入 toast 队列
+        let events = crate::background::drain_into(&mut self.state, &mut self.bg);
+        for ev in events {
+            if let BgEvent::Toast { kind, message } = ev {
+                self.toasts.push(Toast {
+                    kind,
+                    message,
+                    created_at: Instant::now(),
+                });
+            }
+        }
+        // 老 toast(>4s)淘汰
+        self.toasts
+            .retain(|t| t.created_at.elapsed() < Duration::from_secs(4));
+
+        // 2. 周期性 reload config.json(检测外部修改)
         self.state.maybe_reload();
 
         // 主题切换检测 → set_style
@@ -56,16 +86,26 @@ impl eframe::App for App {
                     ui.weak(format!("v{}", env!("CARGO_PKG_VERSION")));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(8.0);
-                        // W6 wire:打开还原确认 modal
-                        let _ = ui.button(format!(
-                            "↺ {}",
-                            lookup_owned(cur_locale, "dashboard.clearDesktopConfig")
-                        ));
-                        // W6 wire:打开反馈 modal
-                        let _ = ui.button(format!(
-                            "💬 {}",
-                            lookup_owned(cur_locale, "dashboard.feedback")
-                        ));
+                        // W6:点了直接调 ClearDesktop async action
+                        if ui
+                            .button(format!(
+                                "↺ {}",
+                                lookup_owned(cur_locale, "dashboard.clearDesktopConfig")
+                            ))
+                            .clicked()
+                        {
+                            self.bg.dispatch(UiAction::ClearDesktop);
+                        }
+                        // W6:打开反馈 modal
+                        if ui
+                            .button(format!(
+                                "💬 {}",
+                                lookup_owned(cur_locale, "dashboard.feedback")
+                            ))
+                            .clicked()
+                        {
+                            self.state.show_feedback_modal = true;
+                        }
                     });
                 });
             });
@@ -89,7 +129,7 @@ impl eframe::App for App {
 
         // 中心 page
         egui::CentralPanel::default().show(ctx, |ui| {
-            page::render(ui, &mut self.active_page, &mut self.state);
+            page::render(ui, &mut self.active_page, &mut self.state, &self.bg);
         });
 
         // ── deleteModal(W4 实装第一个 modal,W6 加另两个)──
@@ -141,7 +181,7 @@ impl eframe::App for App {
             }
         }
 
-        // ── restartReminderModal(W5 渲染骨架;W6 由切换 provider 流程触发)──
+        // ── restartReminderModal(W5 渲染骨架;W6 已 wire RestartCodex action)──
         if self.state.show_restart_reminder {
             let mut do_now = false;
             let mut do_later = false;
@@ -167,7 +207,6 @@ impl eframe::App for App {
                                     "▶ {}",
                                     lookup_owned(cur_locale, "restartReminder.now")
                                 ))
-                                .on_hover_text("W6 wire 重启 Codex App")
                                 .clicked()
                             {
                                 do_now = true;
@@ -175,10 +214,121 @@ impl eframe::App for App {
                         });
                     });
                 });
-            if do_now || do_later {
+            if do_now {
+                self.bg.dispatch(UiAction::RestartCodex);
                 self.state.show_restart_reminder = false;
-                // do_now 的真正重启在 W6 wire
+            } else if do_later {
+                self.state.show_restart_reminder = false;
             }
+        }
+
+        // ── feedbackModal(W6 第三 modal)──
+        if self.state.show_feedback_modal {
+            let mut close = false;
+            let mut submit = false;
+            egui::Window::new(lookup_owned(cur_locale, "feedback.title"))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.set_min_width(520.0);
+                    ui.add_space(4.0);
+                    ui.weak(lookup_owned(cur_locale, "feedback.intro"));
+                    ui.add_space(8.0);
+
+                    ui.label(lookup_owned(cur_locale, "feedback.titleLabel"));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.state.feedback_title)
+                            .desired_width(500.0)
+                            .hint_text(lookup_owned(cur_locale, "feedback.titlePlaceholder")),
+                    );
+                    ui.add_space(6.0);
+
+                    ui.label(lookup_owned(cur_locale, "feedback.bodyLabel"));
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.state.feedback_body)
+                            .desired_width(500.0)
+                            .desired_rows(8)
+                            .hint_text(lookup_owned(cur_locale, "feedback.bodyPlaceholder")),
+                    );
+                    ui.add_space(6.0);
+
+                    ui.checkbox(
+                        &mut self.state.feedback_include_diagnostics,
+                        lookup_owned(cur_locale, "feedback.includeDiagnostics"),
+                    );
+                    ui.weak(lookup_owned(cur_locale, "feedback.includeDiagnosticsHint"));
+                    ui.add_space(4.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0xf5, 0x9e, 0x0b),
+                        lookup_owned(cur_locale, "feedback.privacyWarning"),
+                    );
+                    ui.add_space(12.0);
+
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button(lookup_owned(cur_locale, "common.cancel"))
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .button(lookup_owned(cur_locale, "feedback.submit"))
+                                .clicked()
+                            {
+                                submit = true;
+                            }
+                        });
+                    });
+                });
+            if submit {
+                if self.state.feedback_body.trim().is_empty() {
+                    self.toasts.push(Toast {
+                        kind: ToastKind::Warn,
+                        message: lookup_owned(cur_locale, "feedback.bodyRequired"),
+                        created_at: Instant::now(),
+                    });
+                } else {
+                    self.bg.dispatch(UiAction::SubmitFeedback {
+                        title: self.state.feedback_title.clone(),
+                        body: self.state.feedback_body.clone(),
+                        include_diagnostics: self.state.feedback_include_diagnostics,
+                    });
+                }
+            }
+            if close {
+                self.state.show_feedback_modal = false;
+            }
+        }
+
+        // ── Toast 队列(右下角浮动)──
+        if !self.toasts.is_empty() {
+            egui::Area::new(egui::Id::new("toasts"))
+                .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-16.0, -16.0))
+                .order(egui::Order::Foreground)
+                .show(ctx, |ui| {
+                    ui.vertical(|ui| {
+                        for t in self.toasts.iter().rev().take(4) {
+                            let color = match t.kind {
+                                ToastKind::Info => egui::Color32::from_rgb(0x14, 0x76, 0xff),
+                                ToastKind::Success => egui::Color32::from_rgb(0x16, 0xa3, 0x4a),
+                                ToastKind::Warn => egui::Color32::from_rgb(0xf5, 0x9e, 0x0b),
+                                ToastKind::Error => egui::Color32::from_rgb(0xff, 0x4d, 0x4f),
+                            };
+                            egui::Frame::group(ui.style())
+                                .inner_margin(egui::Margin::symmetric(12, 8))
+                                .corner_radius(egui::CornerRadius::same(10))
+                                .stroke(egui::Stroke::new(1.0, color))
+                                .show(ui, |ui| {
+                                    ui.colored_label(color, &t.message);
+                                });
+                            ui.add_space(4.0);
+                        }
+                    });
+                });
+            // 有 toast 时强制重绘以触发淘汰
+            ctx.request_repaint_after(Duration::from_millis(500));
         }
     }
 }

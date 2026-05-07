@@ -1126,3 +1126,7 @@ en = 'Log'
 ["desktop.restart"]
 zh = '重启 Codex App'
 en = 'Restart Codex App'
+
+["models.fetchedHint"]
+zh = '上游可用模型'
+en = 'Available models'

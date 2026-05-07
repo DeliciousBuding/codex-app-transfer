@@ -5,10 +5,11 @@
 
 use eframe::egui;
 
+use crate::background::{Bg, UiAction};
 use crate::i18n::lookup_owned;
 use crate::state::AppState;
 
-pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
+pub fn render(ui: &mut egui::Ui, state: &mut AppState, bg: &Bg) {
     let locale = state.settings.language;
     let codex_dir = home_dir().map(|h| h.join(".codex"));
 
@@ -68,17 +69,23 @@ pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
             }
             ui.add_space(16.0);
 
-            // 操作按钮
+            // 操作按钮(W6 wire)
             ui.horizontal(|ui| {
-                let _ = ui
+                if ui
                     .button(format!("⬇ {}", lookup_owned(locale, "desktop.apply")))
-                    .on_hover_text("W6 wire codex_integration::apply_to_codex");
-                let _ = ui
+                    .clicked()
+                {
+                    bg.dispatch(UiAction::ApplyDesktop);
+                }
+                if ui
                     .button(format!("↺ {}", lookup_owned(locale, "desktop.clear")))
-                    .on_hover_text("W6 wire codex_integration::restore_codex_state");
-                let _ = ui
-                    .button(lookup_owned(locale, "desktop.restart"))
-                    .on_hover_text("W6 wire 重启 Codex App / pkill+open -a Codex");
+                    .clicked()
+                {
+                    bg.dispatch(UiAction::ClearDesktop);
+                }
+                if ui.button(lookup_owned(locale, "desktop.restart")).clicked() {
+                    bg.dispatch(UiAction::RestartCodex);
+                }
             });
             ui.add_space(20.0);
 
