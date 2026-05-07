@@ -7,7 +7,6 @@
 use eframe::egui;
 
 use crate::background::Bg;
-use crate::i18n::Locale;
 use crate::state::AppState;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -58,13 +57,6 @@ pub mod providers;
 pub mod providers_add;
 pub mod proxy;
 pub mod settings;
-
-pub fn placeholder(ui: &mut egui::Ui, locale: Locale, title_key: &str, todo_label: &str) {
-    ui.add_space(8.0);
-    ui.heading(crate::i18n::lookup_owned(locale, title_key));
-    ui.add_space(4.0);
-    ui.label(format!("(placeholder · 完整实装在 {todo_label})"));
-}
 
 pub fn render(ui: &mut egui::Ui, page: &mut Page, state: &mut AppState, bg: &Bg) {
     match *page {

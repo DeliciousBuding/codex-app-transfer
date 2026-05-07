@@ -53,7 +53,12 @@ impl Default for ThemeName {
 }
 
 /// 17 字段映射 style.css 17 个 `--xxx` 变量。
+///
+/// `muted` / `success` / `success_soft` 字段当前 apply() 不直接消费(egui Visuals
+/// 没有完全对应的位置),保留供 W7+ 局部组件(toast 边框 / 状态徽章 /
+/// 弱化文字)按需读。
 #[derive(Copy, Clone, Debug)]
+#[allow(dead_code)]
 pub struct Palette {
     pub app_bg: Color32,
     pub surface: Color32,

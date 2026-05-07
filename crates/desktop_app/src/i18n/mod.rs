@@ -45,16 +45,13 @@ impl Default for Locale {
 
 /// 查 i18n key。命中返回当前 locale 的字符串;缺 key 返回 key 本身(便于
 /// 视觉上发现遗漏)。`'static` 寿命来自 phf,不分配。
+///
+/// W7+ 暂未直接调用(全部走 [`lookup_owned`]),保留接口给未来零分配场景。
+#[allow(dead_code)]
 pub fn lookup(locale: Locale, key: &str) -> &'static str {
     match TABLE.get(key) {
         Some(arr) => arr[locale as usize],
-        None => {
-            // 故意 leak — 但这里其实不会真 leak,因为 missing key 返回的是
-            // **静态** key 字面量(调用方传 &'static str)。我们用 trick:
-            // 直接返回 phf 内部生成的 "" 字符串。
-            // 改用 fallback 保 'static:
-            "?"
-        }
+        None => "?",
     }
 }
 

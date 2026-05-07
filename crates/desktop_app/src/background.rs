@@ -17,7 +17,11 @@ use tokio::sync::mpsc;
 use crate::state::AppState;
 
 /// UI 触发的意图。
+///
+/// `CopyToClipboard` 留作"复制 env 命令"按钮(Dashboard W7+ 增强用),
+/// 当前 page UI 还没接但 dispatch 通路通,保留 variant 不删。
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum UiAction {
     StartProxy,
     StopProxy,
@@ -50,7 +54,12 @@ pub enum UiAction {
 }
 
 /// 后台任务回传给 UI 的事件。
+///
+/// 部分 variant 的字段(port / path / id)目前在 drain_into 不读 — toast
+/// 文案在产生事件的同一处直接写入。保留字段方便 W7+ 加 status bar / 备份
+/// 列表 UI 时直接消费。
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum BgEvent {
     Toast {
         kind: ToastKind,

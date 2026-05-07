@@ -315,10 +315,13 @@ pub fn set_auto_launch(enabled: bool) -> Result<(), String> {
     let exe_str = exe
         .to_str()
         .ok_or_else(|| "exe path 含非 UTF-8".to_owned())?;
+    // auto-launch 0.6 把旧的 `set_use_launch_agent(bool)` 弃用,改用更明确的
+    // `set_macos_launch_mode(MacosLaunchMode)`。我们走 LaunchAgent (per-user
+    // launchd plist,不需要 sudo);其他平台此调用是 no-op,接口允许。
     let auto = auto_launch::AutoLaunchBuilder::new()
         .set_app_name("Codex App Transfer")
         .set_app_path(exe_str)
-        .set_use_launch_agent(true)
+        .set_macos_launch_mode(auto_launch::MacOSLaunchMode::LaunchAgent)
         .build()
         .map_err(|e| e.to_string())?;
     if enabled {
