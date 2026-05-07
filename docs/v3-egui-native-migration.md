@@ -302,24 +302,36 @@ frontend/            ← W1-W7 期间存活共存,W8 删
 - [ ] codesign Developer ID + notarize 留给 W7.5 release.yml(本地 build 用 adhoc)
 - [ ] 中文字体 subset 内嵌(W2 用系统 fallback,W7.5 时再决定要不要内嵌减少首启耗时)
 
-#### W7.3 — Windows bundle
+#### W7.3 — Windows bundle(配置就位,需 CI 验证)
 
-- [ ] cargo-wix 或 NSIS 模板,产出 `Codex-App-Transfer-x.y.z-Windows-x64-Setup.exe`
-- [ ] registry 注册 `cas://` URL handler(HKCU\Software\Classes\cas)
-- [ ] (可选)WiX .msi,xtask release-bundle 已识别 `-Windows-x64.msi$`
-- [ ] code-sign 沿用现有 RSA 自签 + Authenticode(若有)
+- [x] `[package.metadata.packager.nsis]` 配 `languages = ["English", "SimpChinese"]`
+- [x] cargo-packager 默认 NSIS 输出 `Codex App Transfer_3.0.0-pre_x64-setup.exe`,xtask release-bundle 的 `-Windows-x64-Setup\.exe$` pattern **不匹配**(大小写+下划线差异),W7.5 时 rename or 改 pattern
+- [x] cas:// URL scheme 通过 `[[deepLinkProtocols]]` 配置,cargo-packager 自动写 NSIS 安装器的 `WriteRegStr HKCU "Software\Classes\cas"`,无需手工
+- [ ] **需要 Windows host 实测验证**:`gh workflow run egui-bundle-test.yml` 跑出 .exe → 装机 → 测 `start cas://providers/add?...`
+- [ ] code-sign Authenticode 留给 W7.5 release.yml
 
-#### W7.4 — Linux bundle
+#### W7.4 — Linux bundle(配置就位,需 CI 验证)
 
-- [ ] cargo-deb 产出 `.deb`,`Depends: libgtk-3-0, libayatana-appindicator3-1, libxdo3`
-- [ ] AppImage 用 appimage-builder
-- [ ] `.desktop` 文件含 `MimeType=x-scheme-handler/cas;` for cas:// 注册
+- [x] `[package.metadata.packager.deb]` 配 depends = libgtk-3-0 / libayatana-appindicator3-1 / libxdo3
+- [x] cargo-packager 自动生成 .desktop 含 `MimeType=x-scheme-handler/cas;` for cas:// 注册(基于 deepLinkProtocols)
+- [x] AppImage 走 cargo-packager 内置(底层 appimage-builder)
+- [ ] **需要 Linux host 实测验证**:`gh workflow run egui-bundle-test.yml` 跑出 .deb / .AppImage → 装到 Ubuntu/Fedora → 测 `xdg-open cas://...`
 
-#### W7.5 — release.yml 改造
+#### W7-验证流水线 ✅ — 新加 dispatch-only workflow
 
-- [ ] 三平台 matrix 从 `cargo tauri build` → 选定的 bundling 工具
-- [ ] xtask release-bundle 输入资产 pattern 已能匹配新文件(检查 platform_patterns)
+- [x] `.github/workflows/egui-bundle-test.yml` 新建 — workflow_dispatch only,**不**绑 push/pr/tag
+  - matrix:macos-latest / ubuntu-22.04 / windows-latest
+  - 步骤:checkout + rust toolchain + sysdeps + `cargo install cargo-packager` + `cargo packager` + 上传 artifact
+  - 不签名(adhoc only),用于 W7.3/W7.4/W6-A 验证
+  - retention 14 天,artifact 名 `egui-{os}`
+- [x] **不**改 release.yml,W2.0 老 release 链路完全不动(并行存活,W8 cutover 时整合)
+
+#### W7.5 — release.yml 改造(放 W8 一起)
+
+- [ ] 三平台 matrix 从 `cargo tauri build` → `cargo packager` (沿用 egui-bundle-test 的 build 步骤)
+- [ ] xtask release-bundle 资产 pattern 检查:`-Windows-x64-Setup\.exe$` 大概率要改成 `_x64-setup\.exe$` 匹配 cargo-packager 输出
 - [ ] **不 push 真 release tag**,先在 PR 上 workflow_dispatch 走 dry run
+- [ ] 决定放在本 PR 还是 W8 cutover 后再改 release.yml(避免破坏 v2.x 后续小版本发布)
 
 #### 验收
 
