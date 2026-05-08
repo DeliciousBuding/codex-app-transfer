@@ -123,9 +123,39 @@ fn is_hop_header(name: &str) -> bool {
     )
 }
 
-/// Authorization 单独剔除:gateway 鉴权用的 token 不能传到上游.
+/// 出站时必须从客户端请求里剔除的 header(除 hop-by-hop 之外):
+///
+/// - `authorization`:gateway 鉴权用的 token,绝不能传到上游(上游用 provider.api_key)
+/// - **Codex CLI / OpenAI 身份头**:`originator` / `x-codex-*` / `x-openai-*` /
+///   `chatgpt-account-id` 等是 Codex CLI 内置注入的身份标记
+///   (`codex-rs/login/src/auth/default_client.rs::default_headers`、
+///    `codex-rs/core/src/client.rs:481-605` 等),Kimi For Coding 等第三方
+///   provider 反爬规则会按这些头判定"非白名单 client"返回 403
+///   `access_terminated_error`。Codex 系身份头对第三方 provider 永远没用,
+///   统一剔除零业务损失,且能防御未来 Codex CLI 加新 identity 头。
+///   provider.extra_headers 已能注入正确身份(如 `User-Agent: KimiCLI/...`)
+///   填补必要 client 标记。
 fn is_strip_on_forward(name: &str) -> bool {
-    name.eq_ignore_ascii_case("authorization")
+    let lower = name.to_ascii_lowercase();
+    if lower == "authorization" {
+        return true;
+    }
+    // 显式黑名单:Codex / OpenAI / ChatGPT 客户端身份头
+    if lower == "originator"
+        || lower == "chatgpt-account-id"
+        || lower == "session_id"
+        || lower == "thread_id"
+    {
+        return true;
+    }
+    // 前缀黑名单:防御未来 Codex CLI 新 identity 头
+    if lower.starts_with("x-codex-")
+        || lower.starts_with("x-openai-")
+        || lower.starts_with("x-chatgpt-")
+    {
+        return true;
+    }
+    false
 }
 
 pub async fn forward_handler(
@@ -220,8 +250,12 @@ pub async fn forward_handler(
         up = up.header(name, value);
     }
 
-    // 7. 发起 + 转译响应(adapter 默认透传;Stage 3.2 起 SSE 状态机会重写流)
-    let resp = up.send().await?;
+    // 7. build Request → 截取出站 headers 备用诊断 → execute
+    //    拆开 send() 等价于 build()+execute(),只是中间能拿到出站 headers
+    //    用于错误诊断日志(脱敏 Authorization / api-key)。
+    let req = up.build()?;
+    let outbound_headers_snapshot = req.headers().clone();
+    let resp = state.http.execute(req).await?;
     let status = resp.status();
     let upstream_headers = filter_hop_headers(resp.headers());
 
@@ -247,7 +281,14 @@ pub async fn forward_handler(
         ))
     } else {
         let body_bytes = resp.bytes().await.unwrap_or_default();
-        log_upstream_error_diag(&telemetry, status, &upstream_url, &plan.body, &body_bytes);
+        log_upstream_error_diag(
+            &telemetry,
+            status,
+            &upstream_url,
+            &outbound_headers_snapshot,
+            &plan.body,
+            &body_bytes,
+        );
         let single = futures_util::stream::once(async move { Ok::<_, std::io::Error>(body_bytes) });
         Box::pin(single)
     };
@@ -345,12 +386,15 @@ impl Drop for TracedStream {
     }
 }
 
-/// 4xx / 5xx 时把请求体片段 + 上游响应体片段写到 telemetry 日志,辅助诊断。
-/// 截断到 ~2KB(req)+ 4KB(resp)避免污染日志。
+/// 4xx / 5xx 时把出站 headers + 请求体片段 + 上游响应体片段写到 telemetry 日志,
+/// 辅助诊断身份头泄漏 / 反爬识别 / token 配置等问题。
+/// 截断到 ~2KB(req)+ 4KB(resp)避免污染日志;headers 全打但脱敏 Authorization /
+/// api-key 等敏感字段。
 fn log_upstream_error_diag(
     telemetry: &crate::telemetry::ProxyTelemetry,
     status: StatusCode,
     upstream_url: &str,
+    outbound_headers: &reqwest::header::HeaderMap,
     request_body: &Bytes,
     response_body: &Bytes,
 ) {
@@ -358,18 +402,70 @@ fn log_upstream_error_diag(
     const RESP_MAX: usize = 4096;
     let req_snippet = bytes_preview(request_body, REQ_MAX);
     let resp_snippet = bytes_preview(response_body, RESP_MAX);
+    let headers_dump = format_headers_redacted(outbound_headers);
     telemetry.logs.add(
         "ERROR",
         format!(
-            "上游错误诊断 {} {}\n  → request body ({} bytes): {}\n  ← response body ({} bytes): {}",
+            "上游错误诊断 {} {}\n  → outbound headers: [{}]\n  → request body ({} bytes): {}\n  ← response body ({} bytes): {}",
             status.as_u16(),
             upstream_url,
+            headers_dump,
             request_body.len(),
             req_snippet,
             response_body.len(),
             resp_snippet,
         ),
     );
+}
+
+/// 把 HeaderMap 渲染成一行 `name=value, name=value, ...` 用于错误诊断日志。
+/// 敏感字段的值替换成 `<redacted len=N>`,只暴露长度,不泄露内容到日志。
+///
+/// 敏感 header 识别规则(精确名 / 前缀 / 子串三层):
+/// - **精确名**:authorization / proxy-authorization / api-key / x-api-key /
+///   openai-api-key / anthropic-api-key / cookie / set-cookie
+/// - **前缀**:`cookie-` / `x-auth-` / `x-csrf-` / `x-session-`(防御自定义)
+/// - **子串**:`secret` / `token` / `credential` / `password`
+///
+/// chatgpt-codex review (PR #57) 指出 cookie 头能携带 session credential,
+/// 错误日志全量泄漏会被攻击者捡到 — 合规要求所有可能含 auth-bearing 数据
+/// 的 header 都进 redact 列表,不只是 OAuth bearer / api key 类。
+fn format_headers_redacted(headers: &reqwest::header::HeaderMap) -> String {
+    let mut parts: Vec<String> = Vec::with_capacity(headers.len());
+    for (name, value) in headers.iter() {
+        let lower = name.as_str().to_ascii_lowercase();
+        // 精确名黑名单
+        let is_exact_sensitive = matches!(
+            lower.as_str(),
+            "authorization"
+                | "proxy-authorization"
+                | "api-key"
+                | "x-api-key"
+                | "openai-api-key"
+                | "anthropic-api-key"
+                | "cookie"
+                | "set-cookie"
+        );
+        // 前缀黑名单(防御自定义敏感头)
+        let is_prefix_sensitive = lower.starts_with("cookie-")
+            || lower.starts_with("x-auth-")
+            || lower.starts_with("x-csrf-")
+            || lower.starts_with("x-session-");
+        // 子串黑名单(关键字命中)
+        let is_keyword_sensitive = lower.contains("secret")
+            || lower.contains("token")
+            || lower.contains("credential")
+            || lower.contains("password");
+
+        if is_exact_sensitive || is_prefix_sensitive || is_keyword_sensitive {
+            let len = value.as_bytes().len();
+            parts.push(format!("{}=<redacted len={}>", name, len));
+        } else {
+            let display = value.to_str().unwrap_or("<binary>");
+            parts.push(format!("{}={}", name, display));
+        }
+    }
+    parts.join(", ")
 }
 
 fn bytes_preview(body: &Bytes, max: usize) -> String {
@@ -488,6 +584,131 @@ mod tests {
         assert!(is_strip_on_forward("Authorization"));
         assert!(is_strip_on_forward("authorization"));
         assert!(!is_strip_on_forward("x-api-key"));
+    }
+
+    #[test]
+    fn codex_identity_headers_stripped_on_forward() {
+        // 精确名黑名单
+        assert!(is_strip_on_forward("originator"));
+        assert!(is_strip_on_forward("Originator"));
+        assert!(is_strip_on_forward("chatgpt-account-id"));
+        assert!(is_strip_on_forward("session_id"));
+        assert!(is_strip_on_forward("thread_id"));
+        // 前缀黑名单
+        assert!(is_strip_on_forward("x-codex-installation-id"));
+        assert!(is_strip_on_forward("x-codex-window-id"));
+        assert!(is_strip_on_forward("X-Codex-Foo-Bar"));
+        assert!(is_strip_on_forward("x-openai-subagent"));
+        assert!(is_strip_on_forward("x-openai-memgen-request"));
+        assert!(is_strip_on_forward("x-chatgpt-anything"));
+        // 普通 header 仍然透传
+        assert!(!is_strip_on_forward("content-type"));
+        assert!(!is_strip_on_forward("user-agent"));
+        assert!(!is_strip_on_forward("accept"));
+    }
+
+    #[test]
+    fn redacts_sensitive_headers_in_diag_log() {
+        use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+        let mut h = HeaderMap::new();
+        // 精确名敏感
+        h.insert(
+            HeaderName::from_static("authorization"),
+            HeaderValue::from_static("Bearer secret-token-xyz"),
+        );
+        h.insert(
+            HeaderName::from_static("api-key"),
+            HeaderValue::from_static("sk-1234567890"),
+        );
+        h.insert(
+            HeaderName::from_static("cookie"),
+            HeaderValue::from_static("session=abc123; user=42"),
+        );
+        h.insert(
+            HeaderName::from_static("set-cookie"),
+            HeaderValue::from_static("xyz=789"),
+        );
+        // 前缀敏感
+        h.insert(
+            HeaderName::from_static("cookie-flavor"),
+            HeaderValue::from_static("oatmeal"),
+        );
+        h.insert(
+            HeaderName::from_static("x-auth-token"),
+            HeaderValue::from_static("nope"),
+        );
+        h.insert(
+            HeaderName::from_static("x-csrf-token"),
+            HeaderValue::from_static("abc"),
+        );
+        h.insert(
+            HeaderName::from_static("x-session-id"),
+            HeaderValue::from_static("xyz"),
+        );
+        // 子串敏感
+        h.insert(
+            HeaderName::from_static("my-secret-thing"),
+            HeaderValue::from_static("hush"),
+        );
+        h.insert(
+            HeaderName::from_static("refresh-token"),
+            HeaderValue::from_static("rt"),
+        );
+        // 普通 header 应保留
+        h.insert(
+            HeaderName::from_static("content-type"),
+            HeaderValue::from_static("application/json"),
+        );
+        h.insert(
+            HeaderName::from_static("user-agent"),
+            HeaderValue::from_static("KimiCLI/1.40.0"),
+        );
+        h.insert(
+            HeaderName::from_static("accept"),
+            HeaderValue::from_static("text/event-stream"),
+        );
+
+        let dump = format_headers_redacted(&h);
+
+        // 敏感值都不应出现在日志里
+        for forbidden in [
+            "secret-token-xyz",
+            "sk-1234567890",
+            "session=abc123",
+            "xyz=789",
+            "oatmeal",
+            "nope",
+            "abc",
+            "hush",
+        ] {
+            assert!(
+                !dump.contains(forbidden),
+                "敏感值 {forbidden:?} 不应出现在 dump 里;dump: {dump}"
+            );
+        }
+        // 全部敏感字段都应有 <redacted len=N> 标记
+        for sensitive_name in [
+            "authorization",
+            "api-key",
+            "cookie",
+            "set-cookie",
+            "cookie-flavor",
+            "x-auth-token",
+            "x-csrf-token",
+            "x-session-id",
+            "my-secret-thing",
+            "refresh-token",
+        ] {
+            let pattern = format!("{sensitive_name}=<redacted len=");
+            assert!(
+                dump.contains(&pattern),
+                "敏感 header {sensitive_name} 应被 redact;dump: {dump}"
+            );
+        }
+        // 普通 header 必须保留原值
+        assert!(dump.contains("content-type=application/json"));
+        assert!(dump.contains("user-agent=KimiCLI/1.40.0"));
+        assert!(dump.contains("accept=text/event-stream"));
     }
 
     #[test]
