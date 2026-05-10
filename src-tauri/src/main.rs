@@ -122,8 +122,25 @@ fn main() {
             // 而且 callback 还可能触发 token persist 写入磁盘但 user 已经
             // 退出 app,产生 ghost 状态)
             let outcome = handlers::gemini_oauth::cancel_in_flight_login();
-            if outcome.cancelled {
-                tracing::info!("app exit: cancelled in-flight OAuth login");
+            if let (true, Some(target_epoch)) = (outcome.cancelled, outcome.cancelled_epoch) {
+                tracing::info!(
+                    target_epoch,
+                    "app exit: cancelled in-flight OAuth login,等 epoch={target_epoch} task 真退出 (≤2s) 防 partial token persist"
+                );
+                // **C1 chatgpt-codex P1+P2 修**:wait_for_login_epoch_complete 用
+                // watch::channel sticky 状态等 specific epoch 完成。比 notify
+                // 强:① guard.drop 在 await 之前发生时仍能"读到" sticky 值
+                //   立即返(P2 持久化完成信号);② preemption 场景下不被另一
+                //   newer login 完成事件误唤醒(P1 specific epoch wait)。
+                // timeout 2s 兜底防 task 异常 hang
+                let _ = tauri::async_runtime::block_on(async {
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        handlers::gemini_oauth::wait_for_login_epoch_complete(target_epoch),
+                    )
+                    .await
+                });
+                tracing::info!(target_epoch, "app exit: epoch={target_epoch} 已退出或 timeout");
             }
             let _ = handlers::desktop::restore_codex_if_enabled("exit");
         }
