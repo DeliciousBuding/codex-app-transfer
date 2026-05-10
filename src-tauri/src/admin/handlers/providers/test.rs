@@ -16,6 +16,19 @@ use super::{normalize_provider_api_format, provider_api_key, provider_test_model
 pub(super) fn build_provider_test_url(base_url: &str, api_format: &str) -> String {
     let clean = base_url.trim().trim_end_matches('/');
     let lower = clean.to_ascii_lowercase();
+    if api_format == "gemini_native" {
+        // Gemini native:用 `/v1beta/models` (list public models) 探测端点。
+        // 不带 key → 401 / 403(我们 v2.1.3 已让 401/403 走"绿色 + auth not
+        // verified" 路径);带 key → 200。两版本(v1alpha for Gemini 3+ /
+        // v1beta for 2.x)的 `models` 端点都返 200,探测 v1beta 即可。
+        if lower.ends_with("/v1beta/models") || lower.ends_with("/v1alpha/models") {
+            return clean.to_owned();
+        }
+        if lower.ends_with("/v1beta") || lower.ends_with("/v1alpha") {
+            return format!("{clean}/models");
+        }
+        return format!("{clean}/v1beta/models");
+    }
     if api_format == "openai_chat" {
         if lower.ends_with("/chat/completions") {
             return clean.to_owned();
@@ -67,6 +80,13 @@ pub(super) fn provider_test_headers(provider: &Value, include_content_type: bool
             "x-api-key" | "x_api_key" | "xapikey" | "apikey" => {
                 if let Ok(value) = HeaderValue::from_str(&api_key) {
                     headers.insert(HeaderName::from_static("x-api-key"), value);
+                }
+            }
+            "google_api_key" | "x-goog-api-key" | "x_goog_api_key" | "google" | "gemini" => {
+                // Google AI Studio Gemini API:`x-goog-api-key: <key>` header
+                // (LiteLLM 注释:API key 不放 URL 防 traceback 泄露)。
+                if let Ok(value) = HeaderValue::from_str(&api_key) {
+                    headers.insert(HeaderName::from_static("x-goog-api-key"), value);
                 }
             }
             "none" | "no" => {}
@@ -164,6 +184,22 @@ fn provider_compatibility_item(provider: &Value) -> Value {
                 "stream": true,
                 "tools": true,
                 "streamingTools": false,
+            },
+        });
+    }
+    if api_format == "gemini_native" {
+        return json!({
+            "id": id,
+            "name": name,
+            "apiFormat": api_format,
+            "level": "stable",
+            "message": "Gemini native generateContent 适配：Codex.app /responses → Gemini wire 直转,含 google_search grounding citations。",
+            "checks": {
+                "models": true,
+                "text": true,
+                "stream": true,
+                "tools": true,
+                "streamingTools": true,
             },
         });
     }
@@ -266,8 +302,27 @@ async fn test_provider_connection(provider: &Value) -> Value {
     if matches!(
         response.status(),
         ReqwestStatusCode::NOT_FOUND | ReqwestStatusCode::METHOD_NOT_ALLOWED
-    ) && !provider_api_key(provider).is_empty()
-    {
+    ) {
+        // ╔═══════════════════════════════════════════════════════════════════════════╗
+        // ║ ⚠️ 防回归 (2026-05-10):POST fallback **绝对不能** 加                       ║
+        // ║       `&& !provider_api_key(provider).is_empty()` 限制                    ║
+        // ╠═══════════════════════════════════════════════════════════════════════════╣
+        // ║ 部分 LLM endpoint **不实现 HEAD/GET**,只接受 POST chat completions:      ║
+        // ║   • Google AI Studio Gemini OpenAI 兼容层 HEAD → 404,POST 不带 key       ║
+        // ║     → 400 "Missing or invalid Authorization header"(实证 2026-05-10)    ║
+        // ║   • Kimi `/v1/chat/completions` HEAD → 404                                ║
+        // ║                                                                           ║
+        // ║ 如果只在 `provider_api_key` 非空时 fallback 到 POST,用户测速时没填 key   ║
+        // ║ (测连接性本来不需要 key)→ 永远卡 HEAD 404 → UI 红色 "endpoint            ║
+        // ║ unavailable" → 误以为 baseUrl 错。实际 baseUrl 完全 work。               ║
+        // ║                                                                           ║
+        // ║ **正确语义**:测速测"endpoint 是否存在 + 是否响应",鉴权层(401/403/      ║
+        // ║ 400 Missing Authorization)v2.1.3 已让绿色 + 文案 "auth not verified"。   ║
+        // ║ POST 不带 key 返 4xx-non-404 = endpoint exists ✅。                       ║
+        // ║                                                                           ║
+        // ║ 看到这条注释又想加回 `is_empty()` 限制 —— **不要改**。回归测试            ║
+        // ║ `head_404_post_400_treats_as_reachable_no_key_required` 就是 防 你 改回去。║
+        // ╚═══════════════════════════════════════════════════════════════════════════╝
         response = match client
             .post(&base_url)
             .headers(content_headers)
@@ -400,6 +455,58 @@ mod tests {
         assert_eq!(
             build_provider_test_url("https://api.example.com", "responses"),
             "https://api.example.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn provider_test_url_gemini_native_uses_models_endpoint() {
+        // Gemini native:用 /v1beta/models 探测(不带 key 走 401 / "auth not verified",
+        // 带 key 200)。base_url 不带版本号 → 自动补 /v1beta/models。
+        assert_eq!(
+            build_provider_test_url("https://generativelanguage.googleapis.com", "gemini_native"),
+            "https://generativelanguage.googleapis.com/v1beta/models"
+        );
+        // 用户在 base_url 已指定 /v1beta → 只补 /models
+        assert_eq!(
+            build_provider_test_url(
+                "https://generativelanguage.googleapis.com/v1beta",
+                "gemini_native"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models"
+        );
+        // Gemini 3+ v1alpha 也支持
+        assert_eq!(
+            build_provider_test_url(
+                "https://generativelanguage.googleapis.com/v1alpha",
+                "gemini_native"
+            ),
+            "https://generativelanguage.googleapis.com/v1alpha/models"
+        );
+        // 完整 URL 已带 /v1beta/models → 不重复加
+        assert_eq!(
+            build_provider_test_url(
+                "https://generativelanguage.googleapis.com/v1beta/models",
+                "gemini_native"
+            ),
+            "https://generativelanguage.googleapis.com/v1beta/models"
+        );
+    }
+
+    #[test]
+    fn provider_test_headers_google_api_key_uses_x_goog_header() {
+        let provider = json!({
+            "apiKey": "AQ.Ab8RN6Jg_secret_key",
+            "authScheme": "google_api_key",
+        });
+        let headers = provider_test_headers(&provider, false);
+        assert_eq!(
+            headers.get("x-goog-api-key").and_then(|v| v.to_str().ok()),
+            Some("AQ.Ab8RN6Jg_secret_key"),
+            "google_api_key authScheme 必须用 x-goog-api-key header,不是 Bearer"
+        );
+        assert!(
+            headers.get(reqwest::header::AUTHORIZATION).is_none(),
+            "Gemini 不能用 Authorization: Bearer(那是 OpenAI 兼容路径,native 走 x-goog-api-key)"
         );
     }
 
@@ -574,6 +681,78 @@ mod tests {
                 .as_str()
                 .unwrap_or("")
                 .contains("API key not configured or auth not verified"));
+        });
+    }
+
+    #[test]
+    fn head_404_post_400_treats_as_reachable_no_key_required() {
+        // 关键防回归(2026-05-10):部分 LLM endpoint(如 Google AI Studio Gemini
+        // OpenAI 兼容层)HEAD/GET 不实现返 404,POST 不带 key 返 400/401 表明
+        // endpoint 存在。此测试 mock 这个场景:
+        //   • HEAD /v1/chat/completions → 404
+        //   • POST /v1/chat/completions → 400 "Missing or invalid Authorization header"
+        // form 没填 apiKey 时也必须 fallback POST(过去一旦加回 `&& !key.is_empty()`
+        // 限制就会失效,死在 HEAD 404 红色 endpoint unavailable)。
+        //
+        // 对应代码:`test.rs::test_provider_connection` 的 POST fallback 必须
+        // 不依赖 key 非空。**如果你看到这条测试又想"优化"那条 if 加 key 限制,
+        // 这里就是兜底。**
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            use axum::http::{Method, StatusCode as AxumStatusCode};
+            use axum::routing::any;
+            use axum::Json;
+            use axum::Router;
+            use tokio::net::TcpListener;
+
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            // 单一 any handler 按 method 分流(POST 返 400 模拟 Gemini Missing
+            // Authorization,HEAD/GET 返 404 模拟 endpoint 不实现 HEAD)
+            let app = Router::new().route(
+                "/v1/chat/completions",
+                any(|method: Method| async move {
+                    if method == Method::POST {
+                        (
+                            AxumStatusCode::BAD_REQUEST,
+                            Json(json!({"error": {"code": 400, "message": "Missing or invalid Authorization header.", "status": "INVALID_ARGUMENT"}})),
+                        )
+                    } else {
+                        (AxumStatusCode::NOT_FOUND, Json(json!({})))
+                    }
+                }),
+            );
+            let server = tokio::spawn(async move {
+                let _ = axum::serve(listener, app).await;
+            });
+            let provider_no_key = json!({
+                "name": "Gemini-like (HEAD 404, POST 400 no key)",
+                "baseUrl": format!("http://{addr}/v1"),
+                "apiFormat": "openai_chat",
+                "apiKey": "",  // ← 关键:用户没填 key,旧逻辑会卡 HEAD 404 死
+                "models": {"default": "x"}
+            });
+            let result = test_provider_connection(&provider_no_key).await;
+            server.abort();
+            // POST 必须被 fallback 到(不再因 key 空跳过)
+            // POST 返 400 → 走 else 分支 reachable, HTTP 400(reachable=true → ok=true)
+            assert_eq!(result["success"], json!(true));
+            assert_eq!(
+                result["statusCode"], json!(400),
+                "POST fallback 必须发生(不能因 key 空就跳过 POST 死在 HEAD 404)"
+            );
+            assert_eq!(
+                result["ok"], json!(true),
+                "400 < 500 → reachable=true → ok=true,UI 不标 bad → 绿色"
+            );
+            let msg = result["message"].as_str().unwrap_or("");
+            assert!(
+                !msg.contains("endpoint unavailable"),
+                "绝不能显示 endpoint unavailable(那是 baseUrl 错的红色文案)。实际:{msg}"
+            );
         });
     }
 

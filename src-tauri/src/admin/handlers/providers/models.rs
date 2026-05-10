@@ -12,6 +12,62 @@ use super::super::common::err;
 use super::test::{build_provider_test_url, provider_test_error_label, provider_test_headers};
 use super::{clean_base_url, normalize_provider_api_format, provider_index, replace_path_suffix};
 
+/// 按 HTTP status + 上游 raw 错误中的关键词识别成结构化 reason code,
+/// 前端拿 code 走 i18n 翻译(2026-05-10 用户决策:中英两版按当前 locale 切换,
+/// backend 不 hardcode 任何语言文案)。
+///
+/// 已知 pattern 来源:
+/// - Gemini: UNAUTHENTICATED / API_KEY_INVALID / RESOURCE_EXHAUSTED
+/// - OpenAI: invalid_api_key / insufficient_quota / model_not_found
+/// - 通用: timeout / rate_limit / not_found
+fn classify_upstream_error_code(status: u16, raw: Option<&str>) -> &'static str {
+    let lower = raw.unwrap_or("").to_ascii_lowercase();
+    match status {
+        400 => {
+            if lower.contains("api key not valid") || lower.contains("api_key_invalid") {
+                "api_key_invalid"
+            } else if lower.contains("invalid_argument") || lower.contains("malformed") {
+                "invalid_argument"
+            } else {
+                "bad_request"
+            }
+        }
+        401 => {
+            if lower.contains("oauth")
+                || lower.contains("invalid authentication")
+                || lower.contains("expected access token")
+            {
+                "unauthenticated_oauth"
+            } else if lower.contains("expired") {
+                "unauthenticated_expired"
+            } else {
+                "unauthenticated"
+            }
+        }
+        403 => {
+            if lower.contains("permission_denied") || lower.contains("permission denied") {
+                "permission_denied"
+            } else if lower.contains("billing") || lower.contains("payment") {
+                "billing_required"
+            } else {
+                "forbidden"
+            }
+        }
+        404 => "not_found",
+        405 => "method_not_allowed",
+        408 | 504 => "timeout",
+        429 => {
+            if lower.contains("quota") || lower.contains("resource_exhausted") {
+                "quota_exceeded"
+            } else {
+                "rate_limited"
+            }
+        }
+        500..=599 => "server_error",
+        _ => "unknown",
+    }
+}
+
 fn model_endpoint_candidates(provider: &Value) -> Vec<String> {
     let base_url = clean_base_url(
         provider
@@ -28,7 +84,13 @@ fn model_endpoint_candidates(provider: &Value) -> Vec<String> {
     let upstream = build_provider_test_url(&base_url, api_format);
     let mut candidates = Vec::new();
 
-    if api_format == "openai_chat" {
+    if api_format == "gemini_native" {
+        // Gemini native:**只**用 build_provider_test_url 拼好的 endpoint
+        // (`/v1beta/models` 或 `/v1alpha/models`,跟 base_url 是否带版本相关)。
+        // **不要**push 别的 candidates(如 `{base_url}/models` 或 v1/models),
+        // Google 上游对 unknown path 返 404 — 多 fallback 浪费请求 + 日志噪音。
+        candidates.push(upstream.clone());
+    } else if api_format == "openai_chat" {
         candidates.push(replace_path_suffix(
             &upstream,
             &["/chat/completions", "/completions"],
@@ -193,7 +255,13 @@ fn suggest_model_mappings(model_ids: &[String]) -> Value {
 async fn fetch_provider_models_impl(provider: &Value) -> Value {
     let endpoints = model_endpoint_candidates(provider);
     if endpoints.is_empty() {
-        return json!({"success": false, "message": "API 地址无效", "models": [], "suggested": {}});
+        return json!({
+            "success": false,
+            "message": "models.fetchFailed",
+            "models": [],
+            "suggested": {},
+            "errors": [{"code": "invalid_base_url"}],
+        });
     }
 
     let headers = provider_test_headers(provider, false);
@@ -205,33 +273,61 @@ async fn fetch_provider_models_impl(provider: &Value) -> Value {
     {
         Ok(client) => client,
         Err(error) => {
+            // client builder 失败极罕见(系统资源耗尽等);返结构化 code 给前端 i18n
+            let _ = error;
             return json!({
                 "success": false,
-                "message": "cannot auto-fetch model list",
+                "message": "models.fetchFailed",
                 "models": [],
                 "suggested": {},
-                "errors": [format!("client: {}", provider_test_error_label(&error))],
+                "errors": [{"code": "client_init_failure"}],
             });
         }
     };
 
-    let mut errors: Vec<String> = Vec::new();
+    let mut errors: Vec<Value> = Vec::new();
     for endpoint in endpoints {
+        let host = reqwest::Url::parse(&endpoint)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from))
+            .unwrap_or_else(|| endpoint.clone());
         let response = match client.get(&endpoint).headers(headers.clone()).send().await {
             Ok(response) => response,
             Err(error) => {
-                errors.push(format!("{endpoint}: {}", provider_test_error_label(&error)));
+                // 不透传英文 reqwest error label,返结构化 code 给前端 i18n 翻
+                let code = match provider_test_error_label(&error) {
+                    "Timeout" => "network_timeout",
+                    "ConnectError" => "network_connect",
+                    "RedirectError" => "network_redirect",
+                    "DecodeError" => "network_decode",
+                    "BodyError" => "network_body",
+                    "RequestError" => "network_request",
+                    _ => "network_other",
+                };
+                errors.push(json!({"host": host, "code": code}));
                 continue;
             }
         };
         if !response.status().is_success() {
-            errors.push(format!("{endpoint}: HTTP {}", response.status().as_u16()));
+            let status = response.status().as_u16();
+            // 读 body 提取 error.message 仅用于 reason 关键词识别(OpenAI/Gemini/
+            // Anthropic 统一 `{"error":{"message":"..."}}` shape),**不透传 raw**
+            // 给 UI;返结构化 code,前端按当前 locale 翻译。
+            let body = response.text().await.unwrap_or_default();
+            let raw = serde_json::from_str::<Value>(&body).ok().and_then(|v| {
+                v.get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .map(String::from)
+            });
+            let code = classify_upstream_error_code(status, raw.as_deref());
+            errors.push(json!({"host": host, "code": code, "statusCode": status}));
             continue;
         }
         let payload = match response.json::<Value>().await {
             Ok(payload) => payload,
             Err(_) => {
-                errors.push(format!("{endpoint}: 非 JSON 响应"));
+                errors.push(json!({"host": host, "code": "non_json_response"}));
                 continue;
             }
         };
@@ -244,13 +340,14 @@ async fn fetch_provider_models_impl(provider: &Value) -> Value {
                 "suggested": suggest_model_mappings(&model_ids),
             });
         }
-        errors.push(format!("{endpoint}: 未发现模型列表"));
+        errors.push(json!({"host": host, "code": "models_not_found"}));
     }
 
     let start = errors.len().saturating_sub(5);
+    // message 现在是 i18n key,前端拿 key 翻译(防 hardcode 中英任一语言)
     json!({
         "success": false,
-        "message": "cannot auto-fetch model list",
+        "message": "models.fetchFailed",
         "models": [],
         "suggested": {},
         "errors": errors[start..].to_vec(),

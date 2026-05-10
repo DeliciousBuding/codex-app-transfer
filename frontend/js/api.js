@@ -12,7 +12,16 @@
     const resp = await fetch(BASE + path, opts);
     const data = await resp.json();
     if (!resp.ok || data.success === false) {
-      throw new Error(data.message || `Request failed: ${method} ${path}`);
+      // baseMessage 直接用 backend message(可能是 i18n key 如 "models.fetchFailed",
+      // 上层负责翻译;也可能是 raw string)。**不在这里 inline errors[0]**:
+      // backend 现在返结构化 errors[] (object 数组,含 code/host/statusCode),
+      // string 拼接会变 "[object Object]"。让上层(如 formatModelFetchError)
+      // 按 i18n 翻译每条 error 后再拼。
+      const baseMessage = data.message || `Request failed: ${method} ${path}`;
+      const error = new Error(baseMessage);
+      error.errors = Array.isArray(data.errors) ? data.errors : [];
+      error.responseData = data;
+      throw error;
     }
     return data;
   }
@@ -35,13 +44,13 @@
     aliyun: { logo: 'assets/providers/aliyun.ico' },
     minimax: { logo: 'assets/providers/minimax.ico' },
     minimaxi: { logo: 'assets/providers/minimax.ico' },
-    // Google AI Studio (Gemini):用 Bootstrap bi-stars 图标(蓝紫四角星视觉
-    // 跟 Gemini 品牌契合,无版权风险无新 binary asset)。子串命中
-    // "google" / "gemini" / "aistudio" / "generativelanguage" 任一都映射到此。
-    google: { icon: 'bi-stars' },
-    gemini: { icon: 'bi-stars' },
-    aistudio: { icon: 'bi-stars' },
-    generativelanguage: { icon: 'bi-stars' },
+    // Google AI Studio:用官方品牌图标(从 aistudio.google.com 抓的
+    // ai_studio_favicon_2_128x128.png,圆形黑底带 sparkle/方框 mark)。
+    // 子串命中 "google" / "gemini" / "aistudio" / "generativelanguage" 任一都映射到此。
+    google: { logo: 'assets/providers/google-ai-studio.png' },
+    gemini: { logo: 'assets/providers/google-ai-studio.png' },
+    aistudio: { logo: 'assets/providers/google-ai-studio.png' },
+    generativelanguage: { logo: 'assets/providers/google-ai-studio.png' },
   };
 
   function buildCustomThirdPartyPreset() {
@@ -107,9 +116,17 @@
       authScheme: payload.authScheme || 'bearer',
       // 未知值 / 缺失 → "openai_chat" fallback(跟后端 normalize_provider_api_format 对齐)。
       // 历史 v1.x 这里 fallback 是 "responses",造成 MiMo / 老配置升级时绕过代理 → 404。
-      apiFormat: ['responses', 'openai_responses', 'anthropic', 'claude', 'messages'].includes(payload.apiFormat)
-        ? 'responses'
-        : 'openai_chat',
+      // **修复历史(2026-05-10)**:旧实现把白名单外任何 apiFormat(包括新加的
+      // `gemini_native`)强制改写成 `'openai_chat'` → backend 收到 openai_chat
+      // 走 /chat/completions 探测 → Gemini native 端点不存在 → 404(用户截图反馈)。
+      // 改成 passthrough 已知协议(responses/openai_chat/gemini_native + 别名),
+      // 让后端 normalize_provider_api_format 唯一负责协议规范化(它已识别全部 3 种)。
+      apiFormat: (() => {
+        const v = (payload.apiFormat || '').toLowerCase().replace(/-/g, '_');
+        if (['responses', 'openai_responses', 'anthropic', 'claude', 'messages'].includes(v)) return 'responses';
+        if (['gemini_native', 'google_ai_studio', 'gemini'].includes(v)) return 'gemini_native';
+        return 'openai_chat';  // openai / openai_chat / chat_completions / 空 / 未知 → openai_chat
+      })(),
       extraHeaders: payload.extraHeaders || {},
       modelCapabilities: payload.modelCapabilities || {},
       requestOptions: payload.requestOptions || {},
@@ -162,9 +179,14 @@
         id: p.id,
         name: p.name,
         baseUrl: p.baseUrl,
-        // 显示标签:仅显式 responses 系列才显示 "Responses",其它(含未知 / 缺失)显示 "OpenAI",
-        // 跟后端 normalize 行为对齐。当前 7 个 builtin preset 全部 openai_chat。
-        apiFormat: ['responses', 'openai_responses', 'anthropic', 'claude', 'messages'].includes(p.apiFormat) ? 'Responses' : 'OpenAI',
+        // 直接 passthrough 后端原值,让前端 normalizeApiFormat 唯一负责协议规范化。
+        // **修复历史(2026-05-10)**:之前这里 hardcode `?'Responses':'OpenAI'`,
+        // 把任何不在白名单的 apiFormat(包括新加的 `gemini_native`)强制改写成
+        // 字面量 `'OpenAI'`,导致 normalizeApiFormat 永远命中 default openai_chat
+        // 分支,UI 显示协议名错误。passthrough + 让 normalizeApiFormat 处理是
+        // 唯一正确做法(它已识别 openai_chat / responses / anthropic / gemini_native
+        // 各种子值,加新协议只需更新 normalizeApiFormat,不需要改这里)。
+        apiFormat: p.apiFormat || 'openai_chat',
         authScheme: p.authScheme || 'bearer',
         models: p.models || {},
         modelOptions: p.modelOptions || {},
@@ -174,6 +196,9 @@
         extraHeaders: p.extraHeaders || {},
         modelCapabilities: p.modelCapabilities || {},
         requestOptions: p.requestOptions || {},
+        // supportsWebSearch:preset 标记是否支持 web_search 配置开关(MiMo /
+        // Kimi / Gemini 三家)。frontend form 据此决定是否渲染开关 UI。
+        supportsWebSearch: !!p.supportsWebSearch,
         ...computeIcon(p),
       }));
       return [...builtin, buildCustomThirdPartyPreset()];

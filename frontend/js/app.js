@@ -9,7 +9,12 @@
     { key: "gpt_5_2", label: "gpt-5.2", icon: "bi-circle", iconClass: "default", source: "gpt-5.2" },
   ];
   const availableThemes = ["default", "green", "orange", "gray", "dark", "white"];
-  const providerAuthSchemes = ["bearer", "x-api-key", "none"];
+  // **2026-05-10 修复**:加 google_api_key(Gemini native 用 `x-goog-api-key` header)。
+  // 旧实现白名单只有 bearer / x-api-key / none,Google AI Studio preset 的
+  // authScheme=google_api_key 经 setAuthSchemeValue 校验失败 → fallback 'bearer'
+  // → backend 用 Authorization: Bearer 调 Gemini /v1beta/models → 401(Google 不接 Bearer)
+  // → 测速看似绿(401 走 auth_not_verified 路径)但实际从未真正鉴权过 + 列模型失败。
+  const providerAuthSchemes = ["bearer", "x-api-key", "google_api_key", "none"];
   const providerFormDefaultRows = ["default", "gpt_5_5", "gpt_5_4", "gpt_5_4_mini", "gpt_5_3_codex", "gpt_5_2"];
   let pendingDeleteId = null;
   let selectedPreset = null;
@@ -145,6 +150,7 @@
     const v = String(apiFormat || "").toLowerCase().replace(/-/g, "_");
     if (["responses", "openai_responses"].includes(v)) return { key: "responses", canonical: "responses" };
     if (["anthropic", "claude", "messages"].includes(v)) return { key: "anthropic", canonical: "anthropic" };
+    if (["gemini_native", "google_ai_studio", "gemini"].includes(v)) return { key: "geminiNative", canonical: "gemini_native" };
     return { key: "openaiChat", canonical: "openai_chat" };
   }
 
@@ -177,6 +183,29 @@
     // 协议切换 → 重渲 mappings UI 让 default required 状态跟当前协议同步
     // (direct 模式 default 解锁为可空,其他场景仍 required)
     setProviderMappings(providerFormMappings);
+  }
+
+  // 控制 web_search 配置开关 row 的显示 + 初始 checkbox state + provider-specific
+  // hint 文案。preset.supportsWebSearch === true 才显示(Kimi / Kimi Code / MiMo
+  // PAYG / MiMo Token Plan 四家;Gemini OpenAI compat chat 不支持 grounding,
+  // 已实测 5 种 variant 全 400,故不开)。
+  // hint 文案按 presetId 选 i18n key,fallback 到 .default;切换 preset 时
+  // 同步更新 dataset.i18n + textContent,语言切换 + preset 切换都不会留旧文案。
+  function setWebSearchRow(supports, enabled, presetId) {
+    const row = $("#providerWebSearchRow");
+    const cb = $("#providerWebSearchEnabled");
+    const hint = $("#providerWebSearchHint");
+    if (row) row.hidden = !supports;
+    if (cb) cb.checked = !!enabled;
+    if (hint) {
+      const specificKey = presetId
+        ? `providersAdd.webSearchEnabledHint.${presetId}`
+        : null;
+      const fallbackKey = "providersAdd.webSearchEnabledHint.default";
+      const useKey = specificKey && t(specificKey) !== specificKey ? specificKey : fallbackKey;
+      hint.dataset.i18n = useKey;
+      hint.textContent = t(useKey);
+    }
   }
 
   function setApiFormatMode(allowSelect, currentValue) {
@@ -330,6 +359,14 @@
     if (Object.keys(responsesBlock).length) result.responses = responsesBlock;
     const chatBlock = normalizeChatBlock(options.chat);
     if (Object.keys(chatBlock).length) result.chat = chatBlock;
+    // **顶级 boolean / 标量字段**:web_search_enabled 由 backend
+    // `convert_web_search_tool` 读 `provider.request_options.web_search_enabled`
+    // 决定是否启用 web 搜索(MiMo / Kimi / Gemini 等支持 web_search 的 provider)。
+    // 之前版本 normalize 不保留此字段 → frontend 编辑保存即剥光,用户必须
+    // 手改 config.json,UX 痛点。本字段必须保留(boolean),否则功能失效。
+    if (typeof options.web_search_enabled === "boolean") {
+      result.web_search_enabled = options.web_search_enabled;
+    }
     return result;
   }
 
@@ -801,6 +838,17 @@
   function providerPayloadFromForm(includeModels = true) {
     const apiKey = $("#providerApiKey").value.trim();
     const mappings = includeModels ? collectProviderMappings() : null;
+    // Web Search 开关:仅当 row 显示(preset.supportsWebSearch === true)时,从
+    // checkbox 收集 web_search_enabled 写入 formRequestOptions;否则保留 form
+    // 状态(preset 不支持时 normalize 阶段会自动剥)。
+    const webSearchRow = $("#providerWebSearchRow");
+    const webSearchToggle = $("#providerWebSearchEnabled");
+    if (webSearchRow && webSearchToggle && !webSearchRow.hidden) {
+      formRequestOptions = {
+        ...formRequestOptions,
+        web_search_enabled: webSearchToggle.checked,
+      };
+    }
     const payload = {
       name: $("#providerName").value.trim(),
       baseUrl: $("#providerBaseUrl").value.trim(),
@@ -892,7 +940,7 @@
         <span class="drag-handle preset-plus"><i class="bi ${added ? "bi-check2" : "bi-plus-lg"}"></i></span>
         <span class="provider-logo">${iconMarkup(preset)}</span>
         <span class="provider-main"><strong>${escapeHtml(preset.name)}</strong><span class="truncate">${escapeHtml(preset.baseUrl)}</span></span>
-        <span class="provider-meta">${escapeHtml(preset.apiFormat)}</span>
+        <span class="provider-meta">${escapeHtml(t(`apiFormatDisplay.${normalizeApiFormat(preset.apiFormat).key}.name`))}</span>
         <span class="provider-actions"><span class="compact-enable ghost"><i class="bi ${added ? "bi-check2" : "bi-plus-lg"}"></i><span>${added ? t("providers.added") : t("providers.add")}</span></span></span>
       </button>
     `;
@@ -1103,6 +1151,7 @@
     $("#providerAuth").value = "bearer";
     renderApiFormatDisplay("openai_chat");
     setApiFormatMode(false, "openai_chat");
+    setWebSearchRow(false, false, null);
     setProviderMappings(emptyMappings());
     setUnverifiedBanner(false);
   }
@@ -1134,6 +1183,15 @@
     setApiFormatMode(!!preset.allowApiFormatSelection, preset.apiFormat);
     formModelCapabilities = normalizeCapabilities(preset.modelCapabilities || {});
     formRequestOptions = normalizeRequestOptions(preset.requestOptions || {});
+    // Web Search 配置开关:preset 标支持 + preset.requestOptions.web_search_enabled
+    // 决定初始 checkbox state(kimi / kimi-code 默认 true,xiaomi-mimo-* 默认 false,
+    // 跟 backend `provider_web_search_enabled` 读取契约一致);hint 文案按
+    // preset.id 选 provider-specific 段落
+    setWebSearchRow(
+      !!preset.supportsWebSearch,
+      !!formRequestOptions.web_search_enabled,
+      preset.id
+    );
     providerAvailableModels = [];
     setProviderMappings(preset.models || emptyMappings());
     renderPresetOptions(preset, preset.models || emptyMappings());
@@ -1182,6 +1240,15 @@
     setAuthSchemeValue(provider.authScheme);
     renderApiFormatDisplay((matchedPreset && matchedPreset.apiFormat) || provider.apiFormat);
     setApiFormatMode(false, (matchedPreset && matchedPreset.apiFormat) || provider.apiFormat);
+    // 编辑场景:支持判定走 matchedPreset.supportsWebSearch(自定义 provider 不命中
+    // builtin → matchedPreset undefined → 不显示开关);初始 checkbox state 读
+    // provider 实际保存的 requestOptions.web_search_enabled;hint 文案按
+    // matchedPreset.id(自定义 provider 时 fallback 到 .default 通用文案)
+    setWebSearchRow(
+      !!(matchedPreset && matchedPreset.supportsWebSearch),
+      !!formRequestOptions.web_search_enabled,
+      matchedPreset?.id || null
+    );
     providerAvailableModels = [];
     setProviderMappings(provider.mappings || emptyMappings());
     renderPresetOptions(selectedPreset, provider.mappings || emptyMappings());
@@ -1496,17 +1563,45 @@
   // 测速结果是否要 UI 标黄(.bad class)。**白名单语义**(silent-failure-hunter
   // review H2):后端将来加新 authStatus 枚举(`tls_warn` / `rate_limited` /
   // `cert_expired` 等)/ 或返 `success: false` 不带 ok 字段,helper 默认标黄不漏判。
-  // 只有显式"全 OK"才标绿:result 存在 + ok!==false + (无 authStatus 或 authStatus==="ok")。
+  //
+  // **修复历史(2026-05-10)**:`auth_required_or_invalid`(401/403)以前被
+  // 当 bad 标黄,但 backend `test.rs:312-318` 注释明确"401/403 = baseUrl 连接性
+  // OK + 鉴权未验证,应绿色"(测连接性本来不需要 key,鉴权层跟连接层解耦)。
+  // 显式 allow-list 这个 authStatus 走绿色,其他未来新增 authStatus 默认仍标黄。
   function isProviderTestResultBad(result) {
     if (!result) return true;
     if (result.success === false) return true;
     if (result.ok === false) return true;
-    if (result.authStatus && result.authStatus !== "ok") return true;
+    if (result.authStatus && result.authStatus !== "ok"
+        && result.authStatus !== "auth_required_or_invalid") {
+      return true;
+    }
     return false;
   }
 
+  // 把 backend errors[] (object 数组,含 code/host/statusCode)按当前 locale i18n 翻译。
+  // 历史兼容:string 元素直接显示。未识别的 code → 走 unknown / unknown_with_status
+  // fallback,把 statusCode 拼进文案("上游返回错误 (HTTP 502)" / "Upstream error (HTTP 502)")。
+  function translateUpstreamError(err) {
+    if (typeof err === "string") return err;
+    if (!err || typeof err !== "object") return t("models.upstreamError.unknown");
+    const code = err.code || "unknown";
+    let translated = t(`models.upstreamError.${code}`);
+    // 没命中(返了 key 自身)→ fallback 通用文案
+    if (translated === `models.upstreamError.${code}`) {
+      translated = t("models.upstreamError.unknown");
+    }
+    if (err.statusCode) {
+      translated = translated.replace("{status}", String(err.statusCode));
+    }
+    return err.host ? `[${err.host}] ${translated}` : translated;
+  }
+
   function formatModelFetchError(error) {
-    const reason = error?.message || t("toast.requestFailed");
+    const errs = (error && error.errors) || [];
+    // 优先用第一个结构化 error(最相关) — 已 i18n;退化路径用 error.message(网络层异常)
+    const detail = errs.length > 0 ? translateUpstreamError(errs[0]) : (error && error.message);
+    const reason = detail || t("toast.requestFailed");
     return `${t("models.fetchFailedManual")}: ${reason}`;
   }
 
