@@ -158,7 +158,9 @@
   function normalizeApiFormat(apiFormat) {
     const v = String(apiFormat || "").toLowerCase().replace(/-/g, "_");
     if (["responses", "openai_responses"].includes(v)) return { key: "responses", canonical: "responses" };
-    if (["anthropic", "claude", "messages"].includes(v)) return { key: "anthropic", canonical: "anthropic" };
+    if (["anthropic_messages", "anthropic", "claude", "messages", "claude_messages"].includes(v)) {
+      return { key: "anthropic", canonical: "anthropic_messages" };
+    }
     if (["gemini_native", "google_ai_studio", "gemini"].includes(v)) return { key: "geminiNative", canonical: "gemini_native" };
     if (["gemini_cli_oauth", "gemini_cli", "google_oauth_cloud_code"].includes(v)) return { key: "geminiCliOauth", canonical: "gemini_cli_oauth" };
     if (["grok_web", "grok", "grok_com"].includes(v)) return { key: "grokWeb", canonical: "grok_web" };

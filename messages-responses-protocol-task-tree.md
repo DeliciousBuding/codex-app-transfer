@@ -2,14 +2,14 @@
 
 > 当前任务: 为 Claude 系列模型新增 `anthropic_messages` 协议适配。
 > 方案文档: `docs/plans/2026-05-13-messages-responses-protocol.md`
-> 当前状态: P5 Adapter 与 Registry 已完成;`anthropic_messages` 已可通过 provider `apiFormat` 路由,但尚未接入配置/UI/preset。
+> 当前状态: P6 配置与 UI 已完成;`anthropic_messages` 已可通过 provider `apiFormat` 保存、展示、测速与抓取模型。Claude preset 仍等待 P7 真实验证后再添加。
 
 ## 已确认事实
 
 - `docs/litellm` 是 `.gitignore` 中声明的本地参考目录,不属于当前仓库跟踪文件。
 - 本地 LiteLLM 已同步到 BerriAI/litellm main `431daa1479f0af506696d1dff236d95566abdddc`,版本 `1.85.0`。
 - 根目录架构要求新增协议走 `core + mapper + thin adapters`,adapter 层不能承载复杂 provider-specific 分支。
-- 当前 `anthropic` / `claude` / `messages` 仍归一到 `responses`,并不是真正的 Anthropic Messages 协议转换。
+- P6 前 `anthropic` / `claude` / `messages` 仍归一到 `responses`;P6 后这些历史别名已归一到 canonical `anthropic_messages`。
 - 当前代码实际已有 `grok_web` mapper/adapter,根架构文档后续需要同步补齐。
 
 ## 推进树
@@ -64,11 +64,11 @@
 
 ### P6 配置与 UI
 
-- [ ] backend normalization 输出 `anthropic_messages`。
-- [ ] provider test/model-list 分支适配 Anthropic Messages。
-- [ ] direct-mode bypass 继续只允许 `responses` / `openai_responses`。
-- [ ] frontend 保存、展示、i18n 文案更新。
-- [ ] 验证通过后再添加 Claude preset。
+- [x] backend normalization 输出 `anthropic_messages`。
+- [x] provider test/model-list 分支适配 Anthropic Messages。
+- [x] direct-mode bypass 继续只允许 `responses` / `openai_responses`。
+- [x] frontend 保存、展示、i18n 文案更新。
+- [ ] P7 真实 Claude 验证通过后再添加 Claude preset。
 
 ### P7 文档与验收
 
@@ -78,12 +78,12 @@
 - [ ] 运行 `cargo test -p codex-app-transfer-adapters`。
 - [ ] 运行 `cargo test -p codex-app-transfer-registry`。
 - [ ] 运行 `cargo test -p codex-app-transfer`。
-- [ ] 运行 `npm run build`。
+- [ ] 前端静态资源验证:当前仓库根目录无 `package.json`,使用 Tauri/Rust 构建链验证嵌入资源。
 - [ ] 使用本地 secret 做 Claude text、tool-call、previous_response_id、upstream error 真实验证。
 
 ## 当前下一步
 
-进入 P6 配置与 UI:让 backend/provider normalization 能保存并使用 `anthropic_messages`,并补齐 provider test/model-list 分支。仍然不要添加 Claude preset,直到 P7 真实 Claude 验证完成。
+进入 P7 文档与验收:更新架构文档/README 或 release notes,继续跑全量 Rust/Tauri 验证,并使用本地 secret 做 Claude text、tool-call、previous_response_id、upstream error 真实验证。仍然不要添加 Claude preset,直到 P7 真实 Claude 验证完成。
 
 ## 执行记录
 
@@ -154,6 +154,24 @@
   - P4 response mapper 需要 P3 的 tool name reverse map,否则 registry 接入后 sanitized tool name 无法可靠还原。
 - proxy 出站请求现在会合并 adapter 默认协议头,并保持 `provider.extraHeaders` 覆盖 adapter defaults;新增回归测试确认客户端同名 header 不会重复上线。
 
+### 2026-05-13 P6
+
+- 更新 provider `apiFormat` 归一化:
+  - `responses` / `openai_responses` 仍归一为 `responses`;
+  - `anthropic_messages` / `anthropic` / `claude` / `messages` / `claude_messages` 归一为 `anthropic_messages`;
+  - 保留 `gemini_native`、`gemini_cli_oauth`、`antigravity_oauth`、`grok_web` 等既有 canonical 协议值,避免保存 custom provider 时被误写回 `openai_chat`。
+- provider 测速新增 Anthropic Messages 分支:
+  - baseUrl 已含 `/v1` 时使用 `/messages`;
+  - baseUrl 未含版本路径时补 `/v1/messages`;
+  - 默认加 `anthropic-version: 2023-06-01`,同时保留 `extraHeaders` 覆盖默认头的能力;
+  - ping body 使用 Anthropic Messages 形态 `messages + max_tokens`。
+- provider 模型列表新增 Anthropic Messages 分支,从 Messages endpoint 推导 peer `/v1/models`,并复用同一默认版本头。
+- direct mode bypass 保持只匹配 `responses` / `openai_responses`;`anthropic_messages` 与历史 Claude alias 继续走 local proxy 做本地协议转换。
+- 前端自定义 provider 协议下拉改为保存 `anthropic_messages`;旧值 `anthropic` / `claude` / `messages` 仍能显示为 Anthropic Messages。
+- 更新中英文 i18n,将 Anthropic Messages 文案从“原生透传”改为“Responses ↔ Anthropic Messages 本地转换”。
+- 未添加 Claude preset。原因:P7 还需要真实 Claude text、tool-call、previous_response_id、upstream error 验证。
+- 发现 P7 旧验收项 `npm run build` 与当前仓库结构不匹配:根目录没有 `package.json`,前端是静态资源/Tauri 嵌入链路,后续应以 Rust/Tauri 构建验证替代。
+
 ## 验证记录
 
 - 已通过: `cargo fmt --all`
@@ -188,3 +206,24 @@
   - P5 后结果:15 passed。
 - 已通过: `cargo check --workspace`
   - 既有 warning 仍为 `gemini_oauth` 未使用 import、`grok_web` dead_code、`src-tauri` unused doc/dead_code,非本次 P5 新增。
+- 已通过: `cargo fmt --all`
+- 已通过: `cargo test -p codex-app-transfer normalize_provider_api_format`
+  - P6 后结果:2 passed。
+- 已通过: `cargo test -p codex-app-transfer provider_test_url_anthropic_messages_uses_messages_endpoint`
+  - P6 后结果:1 passed。
+- 已通过: `cargo test -p codex-app-transfer model_endpoint_candidates_anthropic_messages_use_models_endpoint`
+  - P6 后结果:1 passed。
+- 已通过: `cargo test -p codex-app-transfer provider_connection_posts_anthropic_messages_ping_with_version_header`
+  - P6 后结果:1 passed。沙箱内首次因 127.0.0.1 端口绑定权限失败;提升权限后通过。
+- 已通过: `cargo test -p codex-app-transfer fetch_provider_models_reads_anthropic_messages_models_with_version_header`
+  - P6 后结果:1 passed。使用本地 mock `/v1/models` 验证 `anthropic-version` header。
+- 已通过: `cargo test -p codex-app-transfer admin::handlers::providers`
+  - P6 后结果:20 passed。
+- 已通过: `cargo test -p codex-app-transfer anthropic_aliases_never_bypass_proxy`
+  - P6 后结果:1 passed。
+- 已通过: `cargo fmt --all --check`
+- 已确认不可执行: `npm run build`
+  - 原因:当前仓库根目录没有 `package.json`;后续 P7 应使用 Tauri/Rust 构建链验证前端静态资源嵌入。
+- 已只读检查真实本地配置 `~/.codex-app-transfer/config.json`
+  - 仅统计 `providers[].apiFormat`,未输出任何 secret。
+  - 当前存在 `antigravity_oauth`、`gemini_native`、`grok_web`、`openai_chat`、`responses`;P6 normalizer 会保留这些 canonical 值。
