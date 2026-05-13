@@ -2,19 +2,19 @@
 
 > 日期: 2026-05-13
 > 目标: 为 Claude 系列模型新增一条一等公民的 Anthropic Messages 协议适配路径,让本地 Codex Responses 请求可以转换为上游 `/v1/messages`,并把上游 Anthropic Messages SSE 转回 OpenAI Responses SSE。
-> 当前状态: P2 RFC、Anthropic SSE fixture、request mapper TDD 骨架已完成;生产 mapper 代码尚未开始修改。
+> 当前状态: P6 配置与 UI 已完成;`anthropic_messages` 已可保存、展示、测速、抓取模型并通过 registry/proxy 路由。P7 正在补文档、全量验收与真实 Claude 验证;Claude preset 仍未添加。
 
 ## 1. 结论
 
 本功能应新增 `anthropic_messages` 协议,而不是继续把 `anthropic` / `claude` / `messages` 当成 `responses` 的历史别名。原因是这些值在当前 UI 文案里已经被展示成 Anthropic Messages,但实际运行时仍走 Responses -> Chat 转换,这会让 Claude 原生 Messages 上游拿到错误 wire shape。
 
-实施路径应遵守根目录架构文档中的 `core + mapper + thin adapters` 规则:
+实施路径已遵守根目录架构文档中的 `core + mapper + thin adapters` 规则:
 
 - `core` 继续只放协议无关的生命周期能力,例如路由归一化、会话恢复、Responses SSE 事件拼装。
 - `mapper/anthropic_messages.rs` 承担 Responses <=> Anthropic Messages 的协议映射。
 - `anthropic_messages/mod.rs` 只做薄编排,像 `responses`、`gemini_native`、`grok_web` 一样调用 mapper trait。
-- `registry` 增加 `anthropic_messages` adapter,并显式处理 `anthropic` / `claude` / `messages` 迁移。
-- P2 RFC 已新增到 `docs/protocol-unification-rfc-phase5-anthropic-messages.md`。实现完成后仍需同步 `ARCHITECTURE_PROTOCOL_GUIDE.md` 与变更清单,避免当前 `grok_web` 已落地但根架构文档未列入 target tree 的漂移继续扩大。
+- `registry` 已增加 `anthropic_messages` adapter,并显式处理 `anthropic` / `claude` / `messages` / `claude_messages` 迁移。
+- P7 正在同步 `ARCHITECTURE_PROTOCOL_GUIDE.md`、Phase 5 RFC、README/CHANGELOG 与变更清单,避免文档继续停留在 Phase 4 结构。
 
 ## 2. 已完成的参考基线
 
@@ -78,9 +78,9 @@ Anthropic 官方文档确认:
 
 当前实际代码还包含 `grok_web` mapper 和 adapter,方案实施时需要把架构文档一起补齐。
 
-### 3.2 现有 Anthropic/Messages 行为
+### 3.2 P6 前 Anthropic/Messages 行为
 
-当前行为不是原生 Anthropic Messages:
+P6 前行为不是原生 Anthropic Messages:
 
 - `crates/adapters/src/registry.rs` 把 `anthropic` / `claude` / `messages` 归到 `ResponsesAdapter`。
 - `src-tauri/src/admin/handlers/providers/mod.rs` 把这些别名规范化为 `responses`。
@@ -88,7 +88,7 @@ Anthropic 官方文档确认:
 - `frontend/js/app.js` 与 `frontend/js/i18n.js` 却把它们展示成 Anthropic Messages 或 native passthrough。
 - `docs/api-route-status.md` 已记录 `/v1/messages`、`/claude/v1/messages` 目前只是兼容 alias,不是 Rust adapter 的一等入口。
 
-因此这次不是“补一个路由 alias”,而是新增真实协议转换链路。
+因此这次不是“补一个路由 alias”,而是新增真实协议转换链路。P6 后这些历史别名已在 registry/backend/frontend 三层收敛到 canonical `anthropic_messages`。
 
 ## 4. 目标架构
 
@@ -118,7 +118,7 @@ src-tauri/src/admin/handlers/desktop.rs
 frontend/js/api.js
 frontend/js/app.js
 frontend/js/i18n.js
-crates/registry/src/presets_data.json   # 只在转换链路验证后添加 Claude preset
+crates/registry/src/presets_data.json   # P7 真实 Claude 验证通过后才添加 Claude preset
 ARCHITECTURE_PROTOCOL_GUIDE.md
 docs/protocol-unification-rfc-phase4.md 或新 Phase 5 RFC
 ```
@@ -132,6 +132,19 @@ docs/protocol-unification-rfc-phase4.md 或新 Phase 5 RFC
 
 - 不使用单独的 `messages` 作为 canonical,避免它与本地 `/messages` 路由和 OpenAI Responses 私有 alias 混淆。
 - `anthropic_messages` 明确表达上游 wire format,与 `gemini_native`、`grok_web` 的命名风格一致。
+
+## 4.1 P2-P6 落地状态
+
+- P2:新增 Phase 5 RFC、Anthropic request/SSE fixtures、request mapper TDD 入口。
+- P3:完成 Responses -> Anthropic Messages request mapper,复用 Responses session/tool-call repair/compact pipeline。
+- P4:完成 Anthropic Messages SSE -> Responses SSE response mapper,写入 `ToolCallCache` 与 `ResponseSessionCache`。
+- P5:接入 `AnthropicMessagesAdapter`、`mapper::anthropic_messages`、registry alias、proxy adapter headers。
+- P6:接入 admin/provider/UI:
+  - `apiFormat` 保存归一到 `anthropic_messages`;
+  - provider 测速使用 `/v1/messages` 与 Anthropic ping body;
+  - 模型列表推导 `/v1/models`;
+  - direct mode 仍只允许 `responses` / `openai_responses`;
+  - 前端自定义 provider 保存 canonical `anthropic_messages`,旧 alias 仍显示为 Anthropic Messages。
 
 ## 5. 请求映射方案
 

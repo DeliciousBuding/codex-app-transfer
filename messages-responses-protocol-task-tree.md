@@ -2,7 +2,7 @@
 
 > 当前任务: 为 Claude 系列模型新增 `anthropic_messages` 协议适配。
 > 方案文档: `docs/plans/2026-05-13-messages-responses-protocol.md`
-> 当前状态: P6 配置与 UI 已完成;`anthropic_messages` 已可通过 provider `apiFormat` 保存、展示、测速与抓取模型。Claude preset 仍等待 P7 真实验证后再添加。
+> 当前状态: P7 文档更新与本地 Rust/Tauri 验收已完成;真实 Claude 验证因本机没有可用 Anthropic/Claude secret 或 provider 暂时阻塞。Claude preset 仍等待真实验证后再添加。
 
 ## 已确认事实
 
@@ -72,18 +72,18 @@
 
 ### P7 文档与验收
 
-- [ ] 更新 `ARCHITECTURE_PROTOCOL_GUIDE.md` 与 RFC 变更清单。
-- [ ] 更新 README 或 release notes。
-- [ ] 运行 `cargo fmt --all`。
-- [ ] 运行 `cargo test -p codex-app-transfer-adapters`。
-- [ ] 运行 `cargo test -p codex-app-transfer-registry`。
-- [ ] 运行 `cargo test -p codex-app-transfer`。
-- [ ] 前端静态资源验证:当前仓库根目录无 `package.json`,使用 Tauri/Rust 构建链验证嵌入资源。
-- [ ] 使用本地 secret 做 Claude text、tool-call、previous_response_id、upstream error 真实验证。
+- [x] 更新 `ARCHITECTURE_PROTOCOL_GUIDE.md` 与 RFC 变更清单。
+- [x] 更新 README 或 release notes。
+- [x] 运行 `cargo fmt --all`。
+- [x] 运行 `cargo test -p codex-app-transfer-adapters`。
+- [x] 运行 `cargo test -p codex-app-transfer-registry`。
+- [x] 运行 `cargo test -p codex-app-transfer`。
+- [x] 前端静态资源验证:当前仓库根目录无 `package.json`,使用 Tauri/Rust 构建链验证嵌入资源。
+- [ ] 使用本地 secret 做 Claude text、tool-call、previous_response_id、upstream error 真实验证。Blocked:当前 shell 未检测到 `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY`,且 `~/.codex-app-transfer/config.json` 无 Anthropic/Claude/`anthropic_messages` provider。
 
 ## 当前下一步
 
-进入 P7 文档与验收:更新架构文档/README 或 release notes,继续跑全量 Rust/Tauri 验证,并使用本地 secret 做 Claude text、tool-call、previous_response_id、upstream error 真实验证。仍然不要添加 Claude preset,直到 P7 真实 Claude 验证完成。
+等待真实 Claude 验证所需的本地 Anthropic/Claude secret 或 provider 配置。仍然不要添加 Claude preset,直到 P7 真实 Claude text、tool-call、previous_response_id、upstream error 验证完成。
 
 ## 执行记录
 
@@ -227,3 +227,29 @@
 - 已只读检查真实本地配置 `~/.codex-app-transfer/config.json`
   - 仅统计 `providers[].apiFormat`,未输出任何 secret。
   - 当前存在 `antigravity_oauth`、`gemini_native`、`grok_web`、`openai_chat`、`responses`;P6 normalizer 会保留这些 canonical 值。
+
+### 2026-05-13 P7 文档更新
+
+- 更新 `ARCHITECTURE_PROTOCOL_GUIDE.md`,将当前状态推进到 Phase 5 Anthropic Messages PR,补齐 `grok_web` 与 `anthropic_messages` mapper/adapter 目录,并新增 canonical protocol 清单与 provider UI 验证门槛。
+- 更新 `docs/protocol-unification-rfc-phase5-anthropic-messages.md`,把 RFC 状态从 P3 draft 推进到 P6 complete / P7 validation,补齐 P4-P6 落地状态、rollback 策略和 P7 acceptance gates。
+- 更新 `docs/plans/2026-05-13-messages-responses-protocol.md`,记录 P2-P6 已落地事实,并明确 Claude preset 仍需等待 P7 真实 Claude 验证。
+- 更新 `README.md` / `README.en.md` / `docs/CHANGELOG.md`,加入 Anthropic Messages 支持说明、provider 兼容矩阵行和未发布变更记录。
+
+### 2026-05-13 P7 验收
+
+- 已通过: `cargo fmt --all`。
+- 已通过: `cargo test -p codex-app-transfer-adapters`
+  - 结果:484 unit tests passed;12 `anthropic_messages_request` integration tests passed;10 `anthropic_messages_response` integration tests passed;3 `responses_streaming` integration tests passed。
+  - 既有 warning 仍为 `gemini_oauth` 未使用 import 与 `grok_web` dead_code,非本次 P7 新增。
+- 已通过: `cargo test -p codex-app-transfer-registry`
+  - 结果:45 unit tests passed;7 `golden_compat` integration tests passed。
+- 已通过: `cargo test -p codex-app-transfer`
+  - 结果:78 unit tests passed。
+  - 覆盖 `anthropic_aliases_never_bypass_proxy`、Anthropic Messages provider test URL/header/body、模型列表 `/v1/models` 推导与 `normalize_provider_api_format` canonical 保留。
+- 已通过: `cargo check -p codex-app-transfer --features custom-protocol`
+  - 说明:验证 `src-tauri/build.rs` 监听 `../frontend`、`tauri.conf.json` `frontendDist=../frontend` 与 `include_dir!("$CARGO_MANIFEST_DIR/../frontend")` 这条 Tauri/Rust 静态资源嵌入链路可编译。
+- 已阻塞:真实 Claude text、tool-call、`previous_response_id`、upstream error 验证。
+  - 只读探测未输出 secret 值。
+  - 当前 shell 未检测到 `ANTHROPIC_API_KEY` / `CLAUDE_API_KEY`。
+  - `~/.codex-app-transfer/config.json` 中没有 Anthropic/Claude/`anthropic_messages` provider,也没有 baseUrl 包含 Anthropic/Claude 的 provider。
+  - 因此本轮仍不添加 Claude preset。

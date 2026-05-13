@@ -1,6 +1,6 @@
 # Protocol Unification RFC (Phase 5 Anthropic Messages)
 
-> Status: Draft, P3 request mapper completed on 2026-05-13.
+> Status: P6 complete on 2026-05-13; P7 documentation, full acceptance, and real Claude validation remain.
 > Scope: Add a first-class `anthropic_messages` protocol adapter for Claude-family providers.
 
 ## Goal
@@ -156,6 +156,18 @@ P2 tests:
 
 P3 promoted those ignored tests by replacing the placeholder panic with real mapper calls and adding request-side coverage for path/header defaults, compact lowering, tool-name sanitization, `tool_choice`, thinking, metadata filtering, and orphan tool-result diagnostics.
 
+P4 added response-side tests for text, thinking, tool use, sanitized tool-name reverse mapping, upstream errors, unknown events, `max_tokens`, interrupted streams, session-cache writes, and Anthropic compact responses.
+
+P5 added adapter/registry contract tests and proxy forwarding tests so adapter default protocol headers, including `anthropic-version`, reach upstream while provider `extraHeaders` keeps override precedence.
+
+P6 added admin/provider and UI coverage:
+
+- backend `apiFormat` normalization now persists `anthropic_messages` for `anthropic` / `claude` / `messages` / `claude_messages` aliases;
+- provider connection tests use Anthropic `/v1/messages` URL construction, Anthropic-shaped ping bodies, and `anthropic-version: 2023-06-01`;
+- model-list discovery derives `/v1/models` from Anthropic Messages endpoints;
+- direct mode bypass remains restricted to `responses` / `openai_responses`;
+- frontend custom provider save/display/i18n now uses canonical `anthropic_messages`.
+
 Expected commands after P2:
 
 ```bash
@@ -171,10 +183,23 @@ cargo test -p codex-app-transfer-adapters --test anthropic_messages_request -- -
 
 ## Rollback Strategy
 
-Until P3, rollback is deleting this RFC, fixture files, and the P2 integration test. No production path is affected.
+Until P3, rollback was deleting this RFC, fixture files, and the P2 integration test. No production path was affected.
 
-After P3 starts, rollback should be phase-scoped:
+After P6, rollback should be phase-scoped:
 
-1. Remove registry alias routing first.
-2. Remove adapter wiring.
-3. Keep mapper fixtures and tests if they still describe the intended contract.
+1. Remove provider UI exposure and admin normalization to stop new `anthropic_messages` provider configs from being saved.
+2. Remove registry alias routing so `anthropic_messages` is no longer selected for live requests.
+3. Remove `AnthropicMessagesAdapter` wiring and mapper exports.
+4. Keep mapper fixtures and tests if they still describe the intended future contract.
+
+## P7 Acceptance Gates
+
+Before adding a Claude preset or marking this protocol stable:
+
+- update architecture/readme/release documentation;
+- run `cargo fmt --all`;
+- run `cargo test -p codex-app-transfer-adapters`;
+- run `cargo test -p codex-app-transfer-registry`;
+- run `cargo test -p codex-app-transfer`;
+- validate frontend static-resource embedding through the Tauri/Rust build path, because this repo has no root `package.json` and no standalone `npm run build`;
+- run real Claude-compatible smoke tests for text, tool call/tool result, `previous_response_id`, and upstream error mapping with local secrets, without printing secret values.
