@@ -2,7 +2,7 @@
 
 > 当前任务: 为 Claude 系列模型新增 `anthropic_messages` 协议适配。
 > 方案文档: `docs/plans/2026-05-13-messages-responses-protocol.md`
-> 当前状态: P3 Request Mapper 已完成;`anthropic_messages` 尚未接入 adapter/registry,不会暴露给 UI 或 provider preset。
+> 当前状态: P4 Response Mapper 已完成;`anthropic_messages` 尚未接入 adapter/registry,不会暴露给 UI 或 provider preset。
 
 ## 已确认事实
 
@@ -47,11 +47,11 @@
 
 ### P4 Response Mapper
 
-- [ ] 新增 `crates/adapters/src/anthropic_messages/response.rs`。
-- [ ] 实现 Anthropic Messages SSE -> Responses SSE 状态机。
-- [ ] 写入 `ToolCallCache` 与 `ResponseSessionCache`。
-- [ ] 覆盖 max_tokens、error、unknown event、stream interrupted。
-- [ ] 通过响应侧单测。
+- [x] 新增 `crates/adapters/src/anthropic_messages/response.rs`。
+- [x] 实现 Anthropic Messages SSE -> Responses SSE 状态机。
+- [x] 写入 `ToolCallCache` 与 `ResponseSessionCache`。
+- [x] 覆盖 max_tokens、error、unknown event、stream interrupted。
+- [x] 通过响应侧单测。
 
 ### P5 Adapter 与 Registry
 
@@ -82,7 +82,7 @@
 
 ## 当前下一步
 
-进入 P4 Response Mapper:新增 `anthropic_messages` 响应状态机,把 Anthropic Messages SSE 转回 Responses SSE。不要先改 UI 或 preset,避免用户看到一个尚未闭环的 Claude 协议入口。
+进入 P5 Adapter 与 Registry:把已完成的 request/response mapper 接入 mapper trait、adapter 与 registry。仍然不要先改 UI 或 preset,避免用户看到一个尚未完成真实验证的 Claude 协议入口。
 
 ## 执行记录
 
@@ -121,6 +121,24 @@
   - email/phone 形态 user id 不写入 `metadata.user_id`。
 - 孤立 tool result 现在在请求 mapper 返回可诊断 `BadRequest`,避免把不合法 tool_result 静默发给 Anthropic。
 
+### 2026-05-13 P4
+
+- 新增 `crates/adapters/src/anthropic_messages/response.rs`,实现 Anthropic Messages SSE -> Responses SSE 状态机。
+- 响应侧生命周期覆盖:
+  - `message_start` 输出 `response.created` 与 `response.in_progress`;
+  - `text` block 输出 message item、content part 与 `output_text` delta/done;
+  - `thinking` / `redacted_thinking` block 输出 reasoning summary lifecycle;
+  - `tool_use` block 输出 function_call item 与 arguments delta/done;
+  - `message_stop` 根据 stop reason 输出 `response.completed` 或 `response.incomplete`;
+  - `error` event 输出结构化 `response.failed`;
+  - `ping` 与未知 event 忽略。
+- 响应侧缓存覆盖:
+  - tool_use block 关闭时写入 `ToolCallCache`,供下一轮 `tool_result` repair;
+  - stream wrapper 结束时把 assistant message 写入 `ResponseSessionCache`,供 `previous_response_id` 恢复。
+- 响应侧保留 P3 的 tool name reverse map,上游 sanitized tool name 会在 Responses function_call 与 ToolCallCache 中还原为原始工具名。
+- 将 compact response 的 summary 包装逻辑从 `responses::compact` 提成 `compact_response_body_from_summary_text`,让 Anthropic compact 路径复用同一个 `COMPACT_SUMMARY_PREFIX` 与 `<summary>` 抽取规则。
+- 新增 `crates/adapters/tests/anthropic_messages_response.rs`,覆盖 text、thinking、tool_use、sanitized tool name reverse、error、unknown event、max_tokens、stream interrupted、session cache 与 Anthropic compact response。
+
 ## 验证记录
 
 - 已通过: `cargo fmt --all`
@@ -136,3 +154,10 @@
 - 已通过: `cargo test -p codex-app-transfer-adapters`
   - 结果:483 unit tests passed;12 `anthropic_messages_request` integration tests passed;3 `responses_streaming` integration tests passed。
   - 既有 warning 仍为 `gemini_oauth` 未使用 import 与 `grok_web` dead_code,非本次 P3 新增。
+- 已通过: `cargo fmt --all --check`
+- 已通过: `cargo test -p codex-app-transfer-adapters --test anthropic_messages_response`
+  - P4 后结果:10 passed,0 ignored。
+  - 覆盖 Anthropic text/thinking/tool_use/error/unknown event/max_tokens/interrupted/session cache/compact response。
+- 已通过: `cargo test -p codex-app-transfer-adapters`
+  - P4 后结果:483 unit tests passed;12 `anthropic_messages_request` integration tests passed;10 `anthropic_messages_response` integration tests passed;3 `responses_streaming` integration tests passed。
+  - 既有 warning 仍为 `gemini_oauth` 未使用 import 与 `grok_web` dead_code,非本次 P4 新增。
