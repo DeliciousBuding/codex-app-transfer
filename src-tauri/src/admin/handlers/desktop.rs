@@ -41,6 +41,7 @@ use super::providers::{
     provider_index, provider_model_capabilities, provider_model_mappings, provider_supports_1m,
 };
 use super::proxy::{ensure_gateway_key, read_gateway_key, read_proxy_port, start_proxy_if_needed};
+use codex_app_transfer_registry::DEFAULT_UPDATE_URL;
 
 const ONE_M_CONTEXT_WINDOW: u64 = 1_000_000;
 
@@ -940,7 +941,7 @@ mod tests {
                 "autoApplyOnStart": true,
                 "exposeAllProviderModels": false,
                 "restoreCodexOnExit": true,
-                "updateUrl": "https://github.com/Cmochance/codex-app-transfer/releases/latest/download/latest.json"
+                "updateUrl": DEFAULT_UPDATE_URL
             }
         })
     }
