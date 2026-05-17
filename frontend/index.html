@@ -35,6 +35,7 @@
         <a href="#providers" class="route-tab" data-nav="providers" title="Providers"><i class="bi bi-plug"></i><span data-i18n="nav.providers">提供商</span></a>
         <a href="#proxy" class="route-tab" data-nav="proxy" title="Forwarding"><i class="bi bi-broadcast-pin"></i><span data-i18n="nav.proxy">转发</span></a>
         <a href="#settings" class="route-tab" data-nav="settings" title="Settings"><i class="bi bi-gear"></i><span data-i18n="nav.settings">设置</span></a>
+        <a href="#codex" class="route-tab" data-nav="codex" title="Codex 资产"><i class="bi bi-bookmark"></i><span data-i18n="nav.codex">Codex 资产</span></a>
         <a href="#guide" class="route-tab" data-nav="guide" title="Guide"><i class="bi bi-book"></i><span data-i18n="nav.guide">引导</span></a>
       </nav>
       <div class="header-actions">
@@ -478,6 +479,50 @@
           <div class="about-row"><span data-i18n="settings.checkUpdate">检查更新</span><span class="settings-actions inline-actions"><button class="btn btn-outline-primary btn-sm" type="button" data-action="check-update"><i class="bi bi-cloud-arrow-down"></i><span data-i18n="settings.checkUpdate">检查更新</span></button><button class="btn btn-primary btn-sm" id="settingsInstallUpdate" type="button" data-action="install-update" hidden><i class="bi bi-download"></i><span data-i18n="settings.installUpdate">下载并安装</span></button></span></div>
           <p class="update-status" id="updateStatus"></p>
           <div class="about-row"><span>GitHub</span><a href="https://github.com/Cmochance/codex-app-transfer" target="_blank" rel="noreferrer"><i class="bi bi-box-arrow-up-right"></i></a></div>
+        </article>
+      </section>
+
+      <section class="page" id="page-codex" data-page="codex">
+        <header class="page-title">
+          <h1 data-i18n="codex.title">Codex 资产管理</h1>
+          <p data-i18n="codex.subtitle">管 Codex CLI 全局 AGENTS.md / config.toml MCP / Skills 等(本版 MVP 只 Agents,MCP/Skills 后续)。借鉴 borawong/AiMaMi 受管块设计 — 用 marker 把 app 区跟用户手写区物理隔离, 永远不动用户手写区。</p>
+        </header>
+
+        <article class="panel" id="codex-assets-panel">
+          <div class="form-group">
+            <label class="form-label" for="codexAssetTabSelect" data-i18n="codex.assetType">资产类型</label>
+            <select class="form-select" id="codexAssetTabSelect">
+              <option value="agents" data-i18n="codex.tabAgents">AGENTS.md(全局 instructions)</option>
+              <option value="mcp" disabled data-i18n="codex.tabMcp">MCP servers — 后续 stacked PR</option>
+              <option value="skills" disabled data-i18n="codex.tabSkills">Skills — 后续 stacked PR</option>
+            </select>
+          </div>
+
+          <div class="codex-asset-content" id="codexAgentsTab">
+            <div class="codex-status info-box" id="codexAgentsStatus" style="margin-top: 16px;">
+              <i class="bi bi-info-circle"></i>
+              <p><span data-i18n="codex.statusLoading">状态加载中…</span></p>
+            </div>
+
+            <div class="form-group" style="margin-top: 16px;">
+              <label class="form-label" for="codexAgentsContent" data-i18n="codex.managedContent">受管块内容(start/end marker 之间的内容)</label>
+              <textarea class="form-control" id="codexAgentsContent" rows="10" data-i18n-attr="placeholder|codex.placeholder" placeholder="贴入 app 受管 AGENTS.md 段(留空 = Apply 创建空块或 Preview 看 marker 注入位置)"></textarea>
+            </div>
+
+            <div class="button-row">
+              <button class="btn btn-outline-primary" type="button" data-action="codex-agents-preview"><i class="bi bi-eye"></i><span data-i18n="codex.preview">Preview</span></button>
+              <button class="btn btn-primary" type="button" data-action="codex-agents-apply"><i class="bi bi-check2-circle"></i><span data-i18n="codex.apply">Apply</span></button>
+              <button class="btn btn-outline-primary" type="button" data-action="codex-agents-history-toggle"><i class="bi bi-clock-history"></i><span data-i18n="codex.history">History</span></button>
+              <button class="btn btn-outline-danger" type="button" data-action="codex-agents-clear"><i class="bi bi-x-circle"></i><span data-i18n="codex.clear">Clear</span></button>
+            </div>
+
+            <div class="codex-history" id="codexAgentsHistory" hidden style="margin-top: 16px;">
+              <h3 style="font-size: 16px; font-weight: 700;" data-i18n="codex.historyTitle">History(最多 10 条 snapshot)</h3>
+              <ul id="codexAgentsHistoryList" style="list-style: none; padding: 0;"></ul>
+            </div>
+
+            <pre class="code-block" id="codexAgentsPreviewArea" hidden style="margin-top: 16px; max-height: 400px; overflow: auto;"></pre>
+          </div>
         </article>
       </section>
 

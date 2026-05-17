@@ -1,5 +1,5 @@
 (function () {
-  const routes = ["dashboard", "providers/add", "providers", "desktop", "proxy", "settings", "guide"];
+  const routes = ["dashboard", "providers/add", "providers", "desktop", "proxy", "settings", "codex", "guide"];
   const providerFormModelSlots = [
     { key: "default", label: "Default", icon: "bi-circle-fill", iconClass: "default", source: "未配置映射时默认使用这一项", required: true },
     { key: "gpt_5_5", label: "gpt-5.5", icon: "bi-circle", iconClass: "default", source: "gpt-5.5" },
@@ -2135,6 +2135,7 @@
     if (route === "desktop") await renderDesktop();
     if (route === "proxy") await renderProxy();
     if (route === "settings") await renderSettings();
+    if (route === "codex") await renderCodexAssets();
   }
 
   let currentTheme = "default";
@@ -2845,9 +2846,157 @@
       if (action === "apply-provider-desktop") {
         await applyProviderToDesktop(actionEl);
       }
+
+      // ── Codex 资产管理 (#24 / #25 Agents tab MVP) ──
+      if (action === "codex-agents-preview") {
+        await codexAgentsPreview();
+      }
+      if (action === "codex-agents-apply") {
+        await codexAgentsApply();
+      }
+      if (action === "codex-agents-history-toggle") {
+        await codexAgentsToggleHistory();
+      }
+      if (action === "codex-agents-clear") {
+        if (window.confirm("确认 Clear 受管块?会删除 marker + 内容(进 history 可 rollback)")) {
+          await codexAgentsClear();
+        }
+      }
+      if (action === "codex-agents-rollback") {
+        const idx = Number(actionEl.dataset.idx);
+        if (!Number.isFinite(idx)) return;
+        if (window.confirm(`确认 Rollback 到 history[${idx}]?`)) {
+          await codexAgentsRollback(idx);
+        }
+      }
     } catch (error) {
       console.error(error);
       showToast(error.message || t("toast.requestFailed"));
+    }
+  }
+
+  // ── Codex 资产管理 functions (#24 #25 Agents tab MVP) ──
+
+  async function codexAgentsFetchStatus() {
+    const r = await fetch("/api/codex/agents-md/status");
+    if (!r.ok) throw new Error("status request failed");
+    return r.json();
+  }
+
+  async function codexAgentsLoadAndRender() {
+    const status = await codexAgentsFetchStatus();
+    const el = $("#codexAgentsStatus");
+    if (!el) return;
+    const lastApply = status.lastApply
+      ? new Date(status.lastApply * 1000).toLocaleString()
+      : "无";
+    const stateLabel = status.hasManaged ? "已注入" : "未注入";
+    el.innerHTML = `<i class="bi bi-info-circle"></i><p>
+      <strong>受管块状态:</strong> ${stateLabel}<br>
+      <strong>用户区(marker 外):</strong> ${status.beforeUserBytes + status.afterUserBytes} bytes<br>
+      <strong>历史快照:</strong> ${status.historyCount} 条(上限 10)<br>
+      <strong>上次 apply:</strong> ${lastApply}<br>
+      <strong>目标文件:</strong> <code>${escapeHtml(status.targetPath || "")}</code>
+    </p>`;
+    const ta = $("#codexAgentsContent");
+    if (ta && status.managedContent !== undefined && !ta.dataset.dirty) {
+      ta.value = status.managedContent || "";
+    }
+  }
+
+  async function codexAgentsPreview() {
+    const content = $("#codexAgentsContent")?.value ?? "";
+    const r = await fetch("/api/codex/agents-md/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+    if (!r.ok) throw new Error("preview failed");
+    const j = await r.json();
+    const pre = $("#codexAgentsPreviewArea");
+    if (pre) {
+      pre.textContent = j.rendered ?? "(empty)";
+      pre.hidden = false;
+    }
+  }
+
+  async function codexAgentsApply() {
+    const content = $("#codexAgentsContent")?.value ?? "";
+    const r = await fetch("/api/codex/agents-md/apply", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.error || "apply failed");
+    }
+    const ta = $("#codexAgentsContent");
+    if (ta) delete ta.dataset.dirty;
+    await codexAgentsLoadAndRender();
+    showToast("受管块已 apply");
+  }
+
+  async function codexAgentsClear() {
+    const r = await fetch("/api/codex/agents-md/clear", { method: "POST" });
+    if (!r.ok) throw new Error("clear failed");
+    await codexAgentsLoadAndRender();
+    showToast("受管块已 clear(进 history)");
+  }
+
+  async function codexAgentsRollback(idx) {
+    const r = await fetch("/api/codex/agents-md/rollback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ index: idx }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.error || "rollback failed");
+    }
+    await codexAgentsLoadAndRender();
+    await codexAgentsRenderHistory();
+    showToast(`已 rollback 到 history[${idx}]`);
+  }
+
+  async function codexAgentsRenderHistory() {
+    const r = await fetch("/api/codex/agents-md/history");
+    if (!r.ok) throw new Error("history failed");
+    const j = await r.json();
+    const list = $("#codexAgentsHistoryList");
+    if (!list) return;
+    const items = (j.history || []).map((entry, _i) => {
+      const ts = new Date(entry.timestamp * 1000).toLocaleString();
+      const preview = (entry.managedContent || "").slice(0, 80).replace(/\n/g, " ⏎ ");
+      return `<li style="padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; margin-bottom: 6px;">
+        <div style="display: flex; justify-content: space-between; align-items: center; gap: 12px;">
+          <span style="font-family: monospace; font-size: 12px; color: var(--muted);">[${entry.index}] ${ts}</span>
+          <button class="btn btn-outline-primary btn-sm" type="button" data-action="codex-agents-rollback" data-idx="${entry.index}"><i class="bi bi-arrow-counterclockwise"></i> Rollback</button>
+        </div>
+        <pre style="font-size: 12px; max-height: 60px; overflow: hidden; margin: 4px 0 0; color: var(--muted);">${escapeHtml(preview) || "(empty)"}</pre>
+      </li>`;
+    });
+    list.innerHTML = items.join("") || "<li><em>暂无 history snapshot</em></li>";
+  }
+
+  async function codexAgentsToggleHistory() {
+    const el = $("#codexAgentsHistory");
+    if (!el) return;
+    if (el.hidden) {
+      await codexAgentsRenderHistory();
+      el.hidden = false;
+    } else {
+      el.hidden = true;
+    }
+  }
+
+  async function renderCodexAssets() {
+    await codexAgentsLoadAndRender();
+    // textarea dirty 标记: user 编辑后 status 重 load 不覆盖
+    const ta = $("#codexAgentsContent");
+    if (ta && !ta.dataset.bound) {
+      ta.dataset.bound = "1";
+      ta.addEventListener("input", () => (ta.dataset.dirty = "1"));
     }
   }
 
