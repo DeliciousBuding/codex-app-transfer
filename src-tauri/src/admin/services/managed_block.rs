@@ -184,14 +184,37 @@ pub trait ManagedBlock {
         Ok(parsed.render(&self.start_marker(), &self.end_marker()))
     }
 
-    /// 真写盘:把 new_content 写进 managed 段 + 旧 managed 段进 history snapshot
+    /// 真写盘:把 new_content 写进 managed 段 + 旧 managed 段进 history snapshot.
+    ///
+    /// 写顺序: **history 先 + target 后** + target 失败回滚 history。
+    ///   - P1 fix (codex-bot #206): read_history 用 `?` propagate (history 损坏返
+    ///     Err 而非静默丢历史 — 否则下次 apply 替换整个 history 链, rollback
+    ///     恢复点全丢)
+    ///   - P2 fix (codex-bot #206): atomicity — target write 失败时 pop 刚加的
+    ///     history entry + best-effort 重写 history, 防止"history 多 1 条但 target
+    ///     没变" 不一致 state
     fn apply(&self, new_content: &str) -> Result<(), ManagedBlockError> {
         let parsed = self.parse()?;
         let old_managed = parsed.managed.clone().unwrap_or_default();
 
-        // 写入新内容
+        // P1: propagate history corruption
+        let mut history = self.read_history()?;
+        let entry = HistoryEntry {
+            managed_content: old_managed,
+            applied_content: new_content.to_string(),
+            timestamp: now_unix(),
+        };
+        history.push(entry);
+        if history.len() > HISTORY_LIMIT {
+            let drop_n = history.len() - HISTORY_LIMIT;
+            history.drain(0..drop_n);
+        }
+        // 先 write history (有 history 但 target 没动 = 可恢复; 反过来不行)
+        self.write_history(&history)?;
+
+        // 后 write target
         let new_file = {
-            let mut updated = parsed.clone();
+            let mut updated = parsed;
             updated.managed = Some(new_content.to_string());
             updated.render(&self.start_marker(), &self.end_marker())
         };
@@ -200,27 +223,29 @@ pub trait ManagedBlock {
             fs::create_dir_all(parent)
                 .map_err(|e| ManagedBlockError::Io(format!("mkdir {}: {e}", parent.display())))?;
         }
-        fs::write(path, &new_file)
-            .map_err(|e| ManagedBlockError::Io(format!("write {}: {e}", path.display())))?;
-
-        // 推 history
-        let mut history = self.read_history().unwrap_or_default();
-        history.push(HistoryEntry {
-            managed_content: old_managed,
-            applied_content: new_content.to_string(),
-            timestamp: now_unix(),
-        });
-        if history.len() > HISTORY_LIMIT {
-            let drop_n = history.len() - HISTORY_LIMIT;
-            history.drain(0..drop_n);
+        if let Err(e) = fs::write(path, &new_file) {
+            // P2: target 失败 → pop 刚加的 history entry + best-effort 重写
+            history.pop();
+            if let Err(rb_err) = self.write_history(&history) {
+                // history rollback 也失败 — 记 warn, history 多 1 条 entry 不影响
+                // 后续 rollback 操作 (managed_content 是旧值, applied_content 是
+                // 应用过的新值, rollback 到这个 entry 等于 noop)
+                tracing::warn!(
+                    "apply rollback failed: target write err + history pop write err: target_err={e} history_err={rb_err}"
+                );
+            }
+            return Err(ManagedBlockError::Io(format!(
+                "write {}: {e}",
+                path.display()
+            )));
         }
-        self.write_history(&history)?;
         Ok(())
     }
 
     /// 从 history index 还原 managed 段 (`index` 0 = 最旧,len-1 = 最新)
     fn rollback(&self, index: usize) -> Result<(), ManagedBlockError> {
-        let history = self.read_history().unwrap_or_default();
+        // P1: propagate history corruption
+        let history = self.read_history()?;
         let entry = history.get(index).ok_or_else(|| {
             ManagedBlockError::HistoryAccess(format!(
                 "history index {index} out of bounds (len={})",
@@ -228,15 +253,8 @@ pub trait ManagedBlock {
             ))
         })?;
         let parsed = self.parse()?;
-        let new_file = {
-            let mut updated = parsed.clone();
-            updated.managed = Some(entry.managed_content.clone());
-            updated.render(&self.start_marker(), &self.end_marker())
-        };
-        let path = self.target_path();
-        fs::write(path, &new_file)
-            .map_err(|e| ManagedBlockError::Io(format!("write {}: {e}", path.display())))?;
-        // rollback 也产生新 history entry, 形成"撤销链"
+
+        // 先 staging 新 history entry (still in memory)
         let mut new_history = history.clone();
         new_history.push(HistoryEntry {
             managed_content: parsed.managed.clone().unwrap_or_default(),
@@ -247,7 +265,29 @@ pub trait ManagedBlock {
             let drop_n = new_history.len() - HISTORY_LIMIT;
             new_history.drain(0..drop_n);
         }
+        // 先 write history
         self.write_history(&new_history)?;
+
+        // 后 write target — fail 时 pop history (P2)
+        let new_file = {
+            let mut updated = parsed.clone();
+            updated.managed = Some(entry.managed_content.clone());
+            updated.render(&self.start_marker(), &self.end_marker())
+        };
+        let path = self.target_path();
+        if let Err(e) = fs::write(path, &new_file) {
+            let mut rolled = new_history;
+            rolled.pop();
+            if let Err(rb_err) = self.write_history(&rolled) {
+                tracing::warn!(
+                    "rollback target write failed + history pop write failed: target_err={e} history_err={rb_err}"
+                );
+            }
+            return Err(ManagedBlockError::Io(format!(
+                "write {}: {e}",
+                path.display()
+            )));
+        }
         Ok(())
     }
 
@@ -259,13 +299,9 @@ pub trait ManagedBlock {
             // 本来就没 marker,啥也不做(也不推 history)
             return Ok(());
         }
-        parsed.managed = None;
-        let new_file = parsed.render(&self.start_marker(), &self.end_marker());
-        let path = self.target_path();
-        fs::write(path, &new_file)
-            .map_err(|e| ManagedBlockError::Io(format!("write {}: {e}", path.display())))?;
-        // clear 也进 history,可被 rollback 还原
-        let mut history = self.read_history().unwrap_or_default();
+
+        // P1: propagate history corruption
+        let mut history = self.read_history()?;
         history.push(HistoryEntry {
             managed_content: old_managed,
             applied_content: String::new(),
@@ -275,7 +311,25 @@ pub trait ManagedBlock {
             let drop_n = history.len() - HISTORY_LIMIT;
             history.drain(0..drop_n);
         }
+        // 先 write history
         self.write_history(&history)?;
+
+        // 后 write target — fail 时 pop history (P2)
+        parsed.managed = None;
+        let new_file = parsed.render(&self.start_marker(), &self.end_marker());
+        let path = self.target_path();
+        if let Err(e) = fs::write(path, &new_file) {
+            history.pop();
+            if let Err(rb_err) = self.write_history(&history) {
+                tracing::warn!(
+                    "clear target write failed + history pop write failed: target_err={e} history_err={rb_err}"
+                );
+            }
+            return Err(ManagedBlockError::Io(format!(
+                "write {}: {e}",
+                path.display()
+            )));
+        }
         Ok(())
     }
 
