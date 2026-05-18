@@ -3,7 +3,8 @@
 .tmp/
 build/
 dist/
-release/
+release/*
+!release/Codex-App-Transfer-release-public.pem
 .release-signing/
 __pycache__/
 *.pyc
