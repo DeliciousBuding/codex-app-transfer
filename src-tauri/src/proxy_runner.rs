@@ -1,46 +1,23 @@
-//! 内嵌 axum 代理生命周期管理(Stage 4.3 + Stage 5).
+//! 内嵌 axum 代理生命周期管理。
 //!
-//! Tauri 主进程启动时构造一个 [`ProxyManager`] 注入到 `State<T>`,前端通过
-//! `start_proxy` / `stop_proxy` / `proxy_status` 命令操控,Tauri 主进程
-//! 退出时通过 [`ProxyManager::stop_silent`] **同步**关闭代理。
+//! **核心设计**:proxy 跑在**独立 `std::thread` + 独立 `tokio::runtime::Runtime`**。
+//! stop 时把整个 Runtime drop(`shutdown_background()`)——
+//! - 所有 spawn 在 runtime 上的 task **同步 abort**
+//! - worker thread 退出 → 没人 poll task → task drop
+//! - task 持有的 `TcpStream` / `TcpListener` 跟着 drop → fd close
+//! - **所有 proxy 相关功能一锅端,只保留 Tauri 主界面**
 //!
-//! 设计要点:
-//! - 内部 `std::sync::Mutex<Option<ProxyHandle>>` —— 锁持有时间极短(只读/写
-//!   单个 Option),没有跨 await,**stop / status / stop_silent 全部是同步方法**,
-//!   方便从 Tauri 的 `RunEvent::Exit` 同步路径调用而不需要 `block_on`。
-//! - **`start` 是 async**(TcpListener::bind 必需),但锁取放都在显式 scope 里,
-//!   不跨越 await。
-//! - **生命周期**:`start` 时 spawn tokio task 跑自己写的 accept loop —
-//!   每个 connection 用 `JoinSet.spawn` 而**不**是裸 `tokio::spawn`(关键区别)。
-//!   `stop` / `stop_silent` 通过 `oneshot::Sender::send(())` 触发 select 退 →
-//!   listener drop(端口立即 free)→ `joinset.abort_all()` 强制 cancel **所有**
-//!   in-flight connection sub-task → reqwest stream / SSE 同步被打断 →
-//!   client 收 FIN/RST connection 立即断。
-//! - **为什么不用 `axum::serve`**:它内部对每个 connection 用裸 `tokio::spawn`
-//!   出 detached task,外部无 handle,即使 outer future drop sub-task 仍 alive
-//!   继续 process 同 connection 上的 keep-alive request → 用户感知"停止后还
-//!   在转发"(2026-05-18 真机复现:发过 1 条 message 后 stop 转发不受影响,
-//!   PR #209 select! 方案不够强制)。`JoinSet.abort_all()` 是唯一保证所有
-//!   in-flight connection 同步 abort 的方式。
+//! 不再使用 CancellationToken / JoinSet / 自己写 accept loop / raw fd shutdown /
+//! application-level gate middleware 等"兜底逻辑"—— `Runtime::shutdown_background`
+//! 是 tokio 提供的 OS-level "杀光所有 task" 原语,不需要 user-space cancel chain。
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use std::sync::{mpsc, Arc};
 
-use axum::body::Body;
-use axum::extract::Request;
-use codex_app_transfer_proxy::{build_router_with_gate, StaticResolver};
+use codex_app_transfer_proxy::{build_router, StaticResolver};
 use codex_app_transfer_registry::{config_file, Config};
-use hyper::body::Incoming;
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto::Builder;
-use hyper_util::service::TowerToHyperService;
 use serde::Serialize;
-use tokio::net::TcpListener;
-use tokio::sync::oneshot;
-use tokio::task::{JoinHandle, JoinSet};
-use tokio_util::sync::CancellationToken;
-use tower::ServiceExt;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ProxyStatus {
@@ -55,54 +32,10 @@ pub struct ProxyStatus {
 
 struct ProxyHandle {
     addr: SocketAddr,
-    /// 停止信号 — `stop` / `stop_silent` send 给跑着的 accept-loop task,
-    /// task 收到后 break accept loop → drop listener(端口 free)→ 跑
-    /// `connections.shutdown().await` 等所有 sub-task die。
-    shutdown_tx: oneshot::Sender<()>,
-    /// **关键** in-flight connection cancel token —— 每个 connection sub-task
-    /// 在 `tokio::select! { conn.await, cancel.cancelled().await }` 里跑;
-    /// stop_silent 调 `cancel.cancel()` 同步 wake 所有 sub-task 的 cancelled
-    /// arm → select arm 命中 → drop conn future → hyper connection drop →
-    /// **TCP socket 同步 close → client 收 FIN/RST 立即断**。
-    ///
-    /// 为什么不能只靠 `task.abort()`:tokio abort 是 schedule cancellation,
-    /// task 必须在 yield point 才生效。reqwest stream / SSE await upstream
-    /// response 可能很久不 yield,abort 滞后到数秒甚至永远。
-    /// `CancellationToken.cancel()` 立刻 wake 所有 `cancelled()` listener,
-    /// select arm 立即 ready 触发 drop,不依赖 sub-task 主动 yield。
-    cancel: CancellationToken,
-    /// accept-loop task 的 JoinHandle —— 主路径靠 shutdown_tx + cancel 协同
-    /// 让 task 自然跑完(break loop + drop listener + 等 sub-task die),
-    /// **stop_silent 不调 task.abort()**(否则会抢先 cancel task,task 跑不
-    /// 到 connections.shutdown().await,sub-task cancel 链断)。
-    ///
-    /// 历史踩坑(2026-05-18):
-    /// - PR #207 task.abort:同上,reqwest stream 不 yield → abort 永远等
-    /// - PR #209 select! + axum::serve:future drop 不传到 axum 内裸 spawn
-    ///   出的 connection sub-task
-    /// - PR #209 第二 commit JoinSet + abort_all:对了一半 —— JoinSet
-    ///   拿到 handle 了,**但 stop_silent 同时调 task.abort() 抢先 cancel
-    ///   task,task 跑不到 connections.shutdown() → sub-task 仍 detached**
-    ///   (2026-05-18 真机第二次复现根因)
-    task: JoinHandle<()>,
-    /// Application-level shutdown gate(in-flight request 三保险):cancel
-    /// → sub-task select wake → conn drop 有微小窗口,gate 在 stop 时同步
-    /// set true,router 顶层 middleware 检查后立刻 503 + Connection: close。
-    gate: Arc<AtomicBool>,
-    /// **关键** active connection 的 OS-level socket fd 表 —— stop_silent
-    /// 时 take vec + `libc::shutdown(fd, SHUT_RDWR)` 主动让 kernel 发 FIN/RST,
-    /// **绕过整个 user-space cancellation chain**(CancellationToken /
-    /// JoinSet abort / hyper conn drop / TokioIo drop 任何环节坏了都不影响)。
-    ///
-    /// 经验(2026-05-18 4 次复现 fail):连 raw fd `shutdown` 在 sub-task
-    /// 内的 cancel arm 都不可靠 —— cancel signal 可能没 propagate 到
-    /// sub-task,sub-task 卡在 select await。stop_silent 直接持有 fd 表
-    /// 主动 shutdown 是最后保险。
-    ///
-    /// fd 来源:`libc::dup(stream.as_raw_fd())` —— 跟原 stream fd 共享
-    /// 同 socket inner state,shutdown 等价于 shutdown 原 stream。
-    #[cfg(unix)]
-    active_fds: Arc<Mutex<Vec<i32>>>,
+    /// **核心**:proxy 跑在这个独立 runtime 上,stop_silent 时调
+    /// `shutdown_background()` 一键 abort 所有 task + worker thread 退出
+    /// → 所有 fd / 资源 cleanup。
+    runtime: tokio::runtime::Runtime,
     gateway_auth: bool,
     provider_count: usize,
     active_provider: Option<String>,
@@ -120,7 +53,7 @@ impl ProxyManager {
 
     /// 启动代理监听 `127.0.0.1:<port>`。已 running 时沿用旧版语义返回当前状态。
     pub async fn start(&self, port: u16) -> Result<ProxyStatus, String> {
-        // 1. 预检查(短锁)
+        // 1. 预检查
         {
             let guard = self.handle.lock().unwrap();
             if let Some(h) = guard.as_ref() {
@@ -134,126 +67,72 @@ impl ProxyManager {
             }
         }
 
-        // 2. 装载 resolver + 绑定 listener(async)
+        // 2. 装载 resolver
         let snapshot = load_resolver_snapshot()?;
-        let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
-            .await
-            .map_err(|e| format!("bind 127.0.0.1:{port} failed: {e}"))?;
-        let addr = listener
-            .local_addr()
-            .map_err(|e| format!("cannot read listener address: {e}"))?;
-        // Application-level gate:start 时 false(放行),stop 时 set true →
-        // router 顶层 middleware 检查后 503 + close 任何 in-flight sub-task
-        // 的后续 request。
-        let gate = Arc::new(AtomicBool::new(false));
-        let router = build_router_with_gate(Arc::new(snapshot.resolver), gate.clone());
-        let (tx, mut rx) = oneshot::channel::<()>();
-        let cancel = CancellationToken::new();
-        let cancel_for_task = cancel.clone();
-        #[cfg(unix)]
-        let active_fds: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
-        #[cfg(unix)]
-        let active_fds_for_task = active_fds.clone();
-        let task = tokio::spawn(async move {
-            // 自己写 accept loop 替代 axum::serve,真正强制释放方案:
-            //
-            // 1. per-connection task 用 `JoinSet.spawn`(拿 handle)+ **每个
-            //    sub-task 内 select { conn.await, cancel.cancelled() }**
-            //    —— cancel 来时 select arm 立刻 wake,drop conn future →
-            //    hyper connection drop → **TCP socket 同步 close** →
-            //    client 收 FIN/RST 立即断
-            //
-            // 2. stop_silent 调 `cancel.cancel()` 同步触发所有 sub-task →
-            //    sub-task naturally complete → connections.shutdown() 返
-            //
-            // 3. 关键:**stop_silent 不调 task.abort()** —— 之前两个 commit
-            //    fail 在这里(task.abort 抢先 cancel server task,task 跑不
-            //    到 connections.shutdown(),sub-task 仍 detached)
-            //
-            // 真机复现历史(2026-05-18):
-            // - PR #207 task.abort:reqwest stream 不 yield → abort 永远等
-            // - PR #209 select! + axum::serve:future drop 不传到 axum 内
-            //   裸 spawn 的 sub-task
-            // - PR #209 JoinSet + abort_all without cancel:task.abort 抢先,
-            //   shutdown() 跑不到
-            let mut connections: JoinSet<()> = JoinSet::new();
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = &mut rx => break,
-                    accept = listener.accept() => {
-                        let Ok((stream, _peer)) = accept else { continue };
-                        // dup 一份 socket fd register 到 active_fds 表,
-                        // stop_silent 时直接通过此表 `libc::shutdown(fd, SHUT_RDWR)`
-                        // 主动让 kernel 发 FIN/RST,**绕过整个 user-space cancel**。
-                        #[cfg(unix)]
-                        let dup_fd = {
-                            use std::os::fd::AsRawFd;
-                            let raw = stream.as_raw_fd();
-                            let dup = unsafe { libc::dup(raw) };
-                            if dup >= 0 {
-                                active_fds_for_task.lock().unwrap().push(dup);
-                                Some(dup)
-                            } else { None }
-                        };
-                        #[cfg(not(unix))]
-                        let dup_fd: Option<i32> = None; // TODO: Windows
-                        let io = TokioIo::new(stream);
-                        let tower_service = router.clone().map_request(
-                            |req: Request<Incoming>| req.map(Body::new),
-                        );
-                        let hyper_service = TowerToHyperService::new(tower_service);
-                        let conn_cancel = cancel_for_task.child_token();
-                        #[cfg(unix)]
-                        let active_fds_for_subtask = active_fds_for_task.clone();
-                        connections.spawn(async move {
-                            let builder = Builder::new(TokioExecutor::new());
-                            let conn = builder.serve_connection_with_upgrades(io, hyper_service);
-                            tokio::pin!(conn);
-                            tokio::select! {
-                                _ = conn.as_mut() => {}
-                                _ = conn_cancel.cancelled() => {}
-                            }
-                            // **关键**:sub-task 完成时 **不 close dup_fd**,
-                            // 也 **不从 active_fds remove entry**。原因:hyper
-                            // `auto::Builder` 协商 H2 时会 spawn 独立 h2 task
-                            // 持有 stream,outer sub-task 完成 ≠ inner h2 task
-                            // 完成。如果 outer 完成立刻 close dup_fd,stop_silent
-                            // 失去强制 shutdown 的 fd → ESTABLISHED 不消失。
-                            // dup_fd leak 由 stop_silent / ProxyHandle drop 统一
-                            // 清理(连续 forward 期间累积 fd ~几十,可接受;
-                            // 一次 stop 全清)。
-                            let _ = (active_fds_for_subtask, dup_fd);
-                        });
+
+        // 3. 创建 dedicated runtime + 启 server
+        //    Runtime::new 不能在 async context 内调,用 spawn_blocking 包。
+        let (addr_tx, addr_rx) =
+            mpsc::channel::<Result<(SocketAddr, tokio::runtime::Runtime), String>>();
+        let resolver = Arc::new(snapshot.resolver);
+        std::thread::Builder::new()
+            .name(format!("cas-proxy-bootstrap-{port}"))
+            .spawn(move || {
+                let rt = match tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(2)
+                    .thread_name("cas-proxy")
+                    .build()
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        let _ = addr_tx.send(Err(format!("create proxy runtime failed: {e}")));
+                        return;
+                    }
+                };
+                let bind_result = rt.block_on(async {
+                    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
+                        .await
+                        .map_err(|e| format!("bind 127.0.0.1:{port} failed: {e}"))?;
+                    let addr = listener
+                        .local_addr()
+                        .map_err(|e| format!("cannot read listener address: {e}"))?;
+                    let router = build_router(resolver);
+                    // 在 runtime 上 spawn server —— 当 runtime shutdown_background
+                    // 时此 task 同步被 abort,listener + 所有 connection sub-task
+                    // 一起 drop,fd close。
+                    rt.spawn(async move {
+                        let _ = axum::serve(listener, router.into_make_service()).await;
+                    });
+                    Ok::<SocketAddr, String>(addr)
+                });
+                match bind_result {
+                    Ok(addr) => {
+                        let _ = addr_tx.send(Ok((addr, rt)));
+                    }
+                    Err(e) => {
+                        rt.shutdown_background();
+                        let _ = addr_tx.send(Err(e));
                     }
                 }
-            }
-            drop(listener); // 端口立即 free
-            connections.shutdown().await; // cancel 已触发,sub-task 应快速 die
-        });
+            })
+            .map_err(|e| format!("spawn proxy thread failed: {e}"))?;
 
-        // 3. 落盘 handle(短锁;若期间被另一路径插入,关掉自己回滚)
+        let (addr, runtime) = addr_rx
+            .recv()
+            .map_err(|e| format!("proxy bootstrap channel error: {e}"))??;
+
+        // 4. 落盘 handle(短锁;若期间被另一路径插入,关掉自己回滚)
         let new_handle = ProxyHandle {
             addr,
-            shutdown_tx: tx,
-            cancel,
-            task,
-            gate,
-            #[cfg(unix)]
-            active_fds,
+            runtime,
             gateway_auth: snapshot.gateway_auth,
             provider_count: snapshot.provider_count,
             active_provider: snapshot.active_provider.clone(),
         };
         let mut guard = self.handle.lock().unwrap();
         if guard.is_some() {
-            // race condition,自己的 listener 让出去
-            new_handle.gate.store(true, Ordering::Release);
-            #[cfg(unix)]
-            Self::force_shutdown_active_fds(&new_handle);
-            new_handle.cancel.cancel();
-            let _ = new_handle.shutdown_tx.send(());
-            new_handle.task.abort(); // race 路径用 abort 兜底
+            new_handle.runtime.shutdown_background();
             return Err("proxy already started by another path".to_owned());
         }
         *guard = Some(new_handle);
@@ -266,63 +145,25 @@ impl ProxyManager {
         })
     }
 
-    /// 强制停转发(同步 fn,fire-and-forget,不等 task 自然完成)。
-    ///
-    /// 顺序(每步同步立即生效):
-    /// 1. `gate.store(true)` —— in-flight middleware 立刻 503
-    /// 2. `cancel.cancel()` —— 所有 connection sub-task 的 select arm
-    ///    立刻 wake → drop conn → **socket close**(client 收 FIN/RST)
-    /// 3. `shutdown_tx.send(())` —— 唤醒 accept loop break → drop listener
-    ///    → 端口 free
-    ///
-    /// **不**调 `task.abort()` —— 否则会抢先 cancel server task,task 跑不
-    /// 到 `connections.shutdown().await`,sub-task cancel 链断(2026-05-18
-    /// PR #209 第二 commit fail 根因)。
+    /// 停止转发 —— 一键 drop 整个 dedicated runtime,所有 spawn task 同步 abort,
+    /// worker thread 退出,所有 fd / 连接 cleanup,**只保留 Tauri 主界面**。
     #[allow(dead_code)]
     pub fn stop(&self) -> Result<(), String> {
         let mut guard = self.handle.lock().unwrap();
         match guard.take() {
             Some(h) => {
-                h.gate.store(true, Ordering::Release);
-                #[cfg(unix)]
-                Self::force_shutdown_active_fds(&h);
-                h.cancel.cancel();
-                let _ = h.shutdown_tx.send(());
-                drop(h.task);
+                h.runtime.shutdown_background();
                 Ok(())
             }
             None => Err("proxy is not running".to_owned()),
         }
     }
 
-    /// 主动从 active_fds 表逐个 `shutdown(SHUT_RDWR)`,**绕过 user-space
-    /// cancellation chain**,让 OS kernel 同步发 FIN/RST 关 socket。
-    /// 这是 stop 链最强保险 —— 不依赖 sub-task 是否真 yield cancel signal。
-    #[cfg(unix)]
-    fn force_shutdown_active_fds(h: &ProxyHandle) {
-        // take 整 vec(后续 sub-task 不再访问),然后 shutdown + close 每个 fd。
-        // 现在 sub-task 不 close 自己的 dup fd(避免 outer 完成 ≠ inner h2 完成
-        // 时提前 close 失去 shutdown 能力),fd lifetime 由 stop_silent 接管。
-        let fds = std::mem::take(&mut *h.active_fds.lock().unwrap());
-        for fd in fds {
-            unsafe {
-                libc::shutdown(fd, libc::SHUT_RDWR);
-                libc::close(fd);
-            }
-        }
-    }
-
-    /// 静默 stop:app exit / 异常路径用,不报错只尽力关。同样走 gate +
-    /// cancel + signal 三步同步触发,**不**调 task.abort(详见 [`Self::stop`])。
+    /// 静默 stop:app exit / 异常路径用,不报错只尽力关。
     pub fn stop_silent(&self) {
         let mut guard = self.handle.lock().unwrap();
         if let Some(h) = guard.take() {
-            h.gate.store(true, Ordering::Release);
-            #[cfg(unix)]
-            Self::force_shutdown_active_fds(&h);
-            h.cancel.cancel();
-            let _ = h.shutdown_tx.send(());
-            drop(h.task);
+            h.runtime.shutdown_background();
         }
     }
 
