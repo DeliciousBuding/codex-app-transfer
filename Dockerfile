@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY . .
 
-RUN cargo build --release --features server --bin codex-app-transfer-server
+RUN cargo build --release --no-default-features --features server --bin codex-app-transfer-server
 
 # Runtime stage
 FROM debian:bookworm-slim
