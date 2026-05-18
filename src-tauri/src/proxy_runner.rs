@@ -132,7 +132,7 @@ impl ProxyManager {
         };
         let mut guard = self.handle.lock().unwrap();
         if guard.is_some() {
-            new_handle.runtime.shutdown_background();
+            Self::drop_runtime_off_thread(new_handle);
             return Err("proxy already started by another path".to_owned());
         }
         *guard = Some(new_handle);
@@ -152,7 +152,7 @@ impl ProxyManager {
         let mut guard = self.handle.lock().unwrap();
         match guard.take() {
             Some(h) => {
-                h.runtime.shutdown_background();
+                Self::drop_runtime_off_thread(h);
                 Ok(())
             }
             None => Err("proxy is not running".to_owned()),
@@ -163,8 +163,28 @@ impl ProxyManager {
     pub fn stop_silent(&self) {
         let mut guard = self.handle.lock().unwrap();
         if let Some(h) = guard.take() {
-            h.runtime.shutdown_background();
+            Self::drop_runtime_off_thread(h);
         }
+    }
+
+    /// 把 ProxyHandle(含 dedicated Runtime)move 到独立 std::thread 里 drop,
+    /// 避开 `Runtime::drop` "在 async context 内 drop 触发 panic" 的检查 ——
+    /// 我们的 stop_silent 经 admin handler(async fn)/ RunEvent::Exit(sync)
+    /// 两条路径调用,async 路径理论上踩 panic 红线(实测 tokio multi-thread
+    /// + cross-runtime 没触发,但 tokio 升级可能变严)。Move 到外部 std::thread
+    /// 内 drop = 远离任何 async context,100% 安全。
+    ///
+    /// thread 在 closure 跑完(shutdown_background 立刻返,然后 h 出 scope drop)
+    /// 后自动 exit,不 leak。Runtime drop 等所有 worker thread 退出,几 ms 内
+    /// 完成,thread 短命无负担。
+    fn drop_runtime_off_thread(h: ProxyHandle) {
+        std::thread::Builder::new()
+            .name("cas-proxy-shutdown".to_owned())
+            .spawn(move || {
+                h.runtime.shutdown_background();
+                // h 在此 thread scope 退出时 drop, Runtime drop in sync context: safe
+            })
+            .ok();
     }
 
     pub fn status(&self) -> ProxyStatus {
