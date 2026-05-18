@@ -89,6 +89,20 @@ struct ProxyHandle {
     /// → sub-task select wake → conn drop 有微小窗口,gate 在 stop 时同步
     /// set true,router 顶层 middleware 检查后立刻 503 + Connection: close。
     gate: Arc<AtomicBool>,
+    /// **关键** active connection 的 OS-level socket fd 表 —— stop_silent
+    /// 时 take vec + `libc::shutdown(fd, SHUT_RDWR)` 主动让 kernel 发 FIN/RST,
+    /// **绕过整个 user-space cancellation chain**(CancellationToken /
+    /// JoinSet abort / hyper conn drop / TokioIo drop 任何环节坏了都不影响)。
+    ///
+    /// 经验(2026-05-18 4 次复现 fail):连 raw fd `shutdown` 在 sub-task
+    /// 内的 cancel arm 都不可靠 —— cancel signal 可能没 propagate 到
+    /// sub-task,sub-task 卡在 select await。stop_silent 直接持有 fd 表
+    /// 主动 shutdown 是最后保险。
+    ///
+    /// fd 来源:`libc::dup(stream.as_raw_fd())` —— 跟原 stream fd 共享
+    /// 同 socket inner state,shutdown 等价于 shutdown 原 stream。
+    #[cfg(unix)]
+    active_fds: Arc<Mutex<Vec<i32>>>,
     gateway_auth: bool,
     provider_count: usize,
     active_provider: Option<String>,
@@ -136,6 +150,10 @@ impl ProxyManager {
         let (tx, mut rx) = oneshot::channel::<()>();
         let cancel = CancellationToken::new();
         let cancel_for_task = cancel.clone();
+        #[cfg(unix)]
+        let active_fds: Arc<Mutex<Vec<i32>>> = Arc::new(Mutex::new(Vec::new()));
+        #[cfg(unix)]
+        let active_fds_for_task = active_fds.clone();
         let task = tokio::spawn(async move {
             // 自己写 accept loop 替代 axum::serve,真正强制释放方案:
             //
@@ -165,46 +183,46 @@ impl ProxyManager {
                     _ = &mut rx => break,
                     accept = listener.accept() => {
                         let Ok((stream, _peer)) = accept else { continue };
-                        // **强制 close socket 三保险**:dup 一份 socket fd
-                        // 给 sub-task 持有,cancel 时直接调 `shutdown(SHUT_RDWR)`
-                        // OS-level 强制 close。**经验**:hyper conn future drop
-                        // 不可靠让 socket 真 close(2026-05-18 真机第三次复现:
-                        // listener drop ✓ 但 ESTABLISHED 持续不消失);raw fd
-                        // shutdown 绕开 hyper / tokio 间接 cancellation,直接
-                        // 让 OS kernel 发 FIN/RST。
+                        // dup 一份 socket fd register 到 active_fds 表,
+                        // stop_silent 时直接通过此表 `libc::shutdown(fd, SHUT_RDWR)`
+                        // 主动让 kernel 发 FIN/RST,**绕过整个 user-space cancel**。
                         #[cfg(unix)]
                         let dup_fd = {
                             use std::os::fd::AsRawFd;
                             let raw = stream.as_raw_fd();
                             let dup = unsafe { libc::dup(raw) };
-                            if dup < 0 { None } else { Some(dup) }
+                            if dup >= 0 {
+                                active_fds_for_task.lock().unwrap().push(dup);
+                                Some(dup)
+                            } else { None }
                         };
                         #[cfg(not(unix))]
-                        let dup_fd: Option<i32> = None; // TODO: Windows WSADuplicateSocket
+                        let dup_fd: Option<i32> = None; // TODO: Windows
                         let io = TokioIo::new(stream);
                         let tower_service = router.clone().map_request(
                             |req: Request<Incoming>| req.map(Body::new),
                         );
                         let hyper_service = TowerToHyperService::new(tower_service);
                         let conn_cancel = cancel_for_task.child_token();
+                        #[cfg(unix)]
+                        let active_fds_for_subtask = active_fds_for_task.clone();
                         connections.spawn(async move {
                             let builder = Builder::new(TokioExecutor::new());
                             let conn = builder.serve_connection_with_upgrades(io, hyper_service);
                             tokio::pin!(conn);
                             tokio::select! {
                                 _ = conn.as_mut() => {}
-                                _ = conn_cancel.cancelled() => {
-                                    #[cfg(unix)]
-                                    if let Some(fd) = dup_fd {
-                                        // OS-level shutdown:client 立即收 FIN/RST
-                                        unsafe { libc::shutdown(fd, libc::SHUT_RDWR); }
-                                    }
-                                }
+                                _ = conn_cancel.cancelled() => {}
                             }
-                            // close dup fd(无论哪个 arm 走完都要释放)
+                            // sub-task 完成:remove + close 自己 dup fd
                             #[cfg(unix)]
                             if let Some(fd) = dup_fd {
-                                unsafe { libc::close(fd); }
+                                let mut fds = active_fds_for_subtask.lock().unwrap();
+                                if let Some(pos) = fds.iter().position(|&f| f == fd) {
+                                    fds.swap_remove(pos);
+                                    drop(fds);
+                                    unsafe { libc::close(fd); }
+                                }
                             }
                         });
                     }
@@ -221,15 +239,18 @@ impl ProxyManager {
             cancel,
             task,
             gate,
+            #[cfg(unix)]
+            active_fds,
             gateway_auth: snapshot.gateway_auth,
             provider_count: snapshot.provider_count,
             active_provider: snapshot.active_provider.clone(),
         };
         let mut guard = self.handle.lock().unwrap();
         if guard.is_some() {
-            // race condition,自己的 listener 让出去:gate + cancel + signal,
-            // task 自然跑完 connections.shutdown() 释放端口。
+            // race condition,自己的 listener 让出去
             new_handle.gate.store(true, Ordering::Release);
+            #[cfg(unix)]
+            Self::force_shutdown_active_fds(&new_handle);
             new_handle.cancel.cancel();
             let _ = new_handle.shutdown_tx.send(());
             new_handle.task.abort(); // race 路径用 abort 兜底
@@ -263,12 +284,27 @@ impl ProxyManager {
         match guard.take() {
             Some(h) => {
                 h.gate.store(true, Ordering::Release);
+                #[cfg(unix)]
+                Self::force_shutdown_active_fds(&h);
                 h.cancel.cancel();
                 let _ = h.shutdown_tx.send(());
-                drop(h.task); // 让 task 自然完成,不 abort
+                drop(h.task);
                 Ok(())
             }
             None => Err("proxy is not running".to_owned()),
+        }
+    }
+
+    /// 主动从 active_fds 表逐个 `shutdown(SHUT_RDWR)`,**绕过 user-space
+    /// cancellation chain**,让 OS kernel 同步发 FIN/RST 关 socket。
+    /// 这是 stop 链最强保险 —— 不依赖 sub-task 是否真 yield cancel signal。
+    #[cfg(unix)]
+    fn force_shutdown_active_fds(h: &ProxyHandle) {
+        let fds = h.active_fds.lock().unwrap().clone();
+        for fd in fds {
+            unsafe { libc::shutdown(fd, libc::SHUT_RDWR); }
+            // 不 close,让 sub-task 自己 close 自己 entry(避免 fd 双重 close
+            // race 误伤 OS 后续 reassigned fd)。
         }
     }
 
@@ -278,9 +314,11 @@ impl ProxyManager {
         let mut guard = self.handle.lock().unwrap();
         if let Some(h) = guard.take() {
             h.gate.store(true, Ordering::Release);
+            #[cfg(unix)]
+            Self::force_shutdown_active_fds(&h);
             h.cancel.cancel();
             let _ = h.shutdown_tx.send(());
-            drop(h.task); // 让 task 自然完成,不 abort
+            drop(h.task);
         }
     }
 
