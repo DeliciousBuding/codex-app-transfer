@@ -1,56 +1,80 @@
-//! Verify shutdown signal drops axum::serve future → listener immediately freed.
+//! 验证 stop 强制释放端口 + 强制 abort in-flight connection sub-task。
 //!
-//! 2026-05-18 fix:用 tokio::select! 把 axum::serve future 跟 shutdown signal
-//! 包一起 → signal 来时 future drop → listener 同步销毁 → 端口立即 free。
+//! 2026-05-18 真机复现:发过 1 条 message 后点停止转发,转发不受影响 →
+//! 根因:`axum::serve` 内部 `tokio::spawn` per-connection 出 detached task,
+//! 外部无 handle,select drop axum::serve future 只断 accept loop +
+//! listener,已建立的 connection sub-task 仍 alive process 同 connection
+//! 上的 keep-alive request。
 //!
-//! 之前用 `with_graceful_shutdown` 在长连接 / keep-alive 场景永远 drain 不完
-//! 导致端口卡占用(用户真机:点停止转发后仍能转发)。
+//! 修复:自己写 accept loop,per-connection task 用 `JoinSet.spawn`,stop
+//! 时 `connections.shutdown().await` 强制 abort 所有 in-flight sub-task。
 
-use std::future::IntoFuture;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Body;
+use axum::extract::Request;
 use codex_app_transfer_proxy::{build_router, StaticResolver};
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder;
+use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
+use tokio::task::JoinSet;
+use tower::ServiceExt;
 
-/// 用跟 production(proxy_runner.rs::start)一样的 select! 模式 spawn server。
-async fn spawn_with_signal(rx: oneshot::Receiver<()>) -> std::net::SocketAddr {
+/// 复刻 production(proxy_runner.rs::start)的 accept-loop + JoinSet 模式,
+/// test 路径必须跟 production 一致才能 verify 真实行为。
+async fn spawn_production_like(rx: oneshot::Receiver<()>) -> std::net::SocketAddr {
     let resolver = Arc::new(StaticResolver::new(None, vec![], None));
     let router = build_router(resolver);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let mut rx = rx;
     tokio::spawn(async move {
-        let serve = axum::serve(listener, router.into_make_service()).into_future();
-        tokio::pin!(serve);
-        tokio::select! {
-            _ = &mut serve => {}
-            _ = rx => {}
+        let mut connections: JoinSet<()> = JoinSet::new();
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut rx => break,
+                accept = listener.accept() => {
+                    let Ok((stream, _)) = accept else { continue };
+                    let io = TokioIo::new(stream);
+                    let tower_service = router.clone().map_request(
+                        |req: Request<Incoming>| req.map(Body::new),
+                    );
+                    let hyper_service = TowerToHyperService::new(tower_service);
+                    connections.spawn(async move {
+                        let builder = Builder::new(TokioExecutor::new());
+                        let _ = builder
+                            .serve_connection_with_upgrades(io, hyper_service)
+                            .await;
+                    });
+                }
+            }
         }
+        drop(listener);
+        connections.shutdown().await;
     });
     addr
 }
 
-/// 核心 verify:signal 来后端口必须在 500ms 内 free。
+/// Test 1: shutdown signal 后端口 ≤500ms 释放(基础)。
 #[tokio::test]
-async fn shutdown_signal_releases_port_immediately() {
+async fn shutdown_releases_port_immediately() {
     let (tx, rx) = oneshot::channel::<()>();
-    let addr = spawn_with_signal(rx).await;
+    let addr = spawn_production_like(rx).await;
 
-    // Step 1: verify port is occupied while server runs.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let bind_before = TcpListener::bind(addr).await;
     assert!(
-        bind_before.is_err(),
-        "expected port {} busy while server running, got: {:?}",
-        addr.port(),
-        bind_before
+        TcpListener::bind(addr).await.is_err(),
+        "port {} should be busy before stop",
+        addr.port()
     );
 
-    // Step 2: signal stop.
     let _ = tx.send(());
 
-    // Step 3: verify port is free within 500ms.
     let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
     loop {
         match TcpListener::bind(addr).await {
@@ -58,54 +82,61 @@ async fn shutdown_signal_releases_port_immediately() {
             Err(_) if tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            Err(e) => panic!(
-                "port {} not released within 500ms after stop signal: {}",
-                addr.port(),
-                e
-            ),
+            Err(e) => panic!("port not released within 500ms: {}", e),
         }
     }
 }
 
-/// 模拟长连接场景:有 keep-alive client 持有 connection 时,signal 来必须
-/// 仍然能强制释放端口(不被 in-flight connection 卡住)。
+/// Test 2: **关键 test** —— in-flight keep-alive connection 持有方,stop
+/// 后**同一 connection 上的下一个 request 必须失败**(connection 被强制
+/// abort)。**之前 PR #209 select! 方案 fail 在这里**:axum::serve 内部
+/// 裸 tokio::spawn 出 detached task,future drop 不影响 → 同 connection
+/// 上后续 req 仍能 process。
 #[tokio::test]
-async fn shutdown_releases_port_even_with_active_keepalive() {
+async fn stop_aborts_inflight_keepalive_connection() {
     let (tx, rx) = oneshot::channel::<()>();
-    let addr = spawn_with_signal(rx).await;
-
+    let addr = spawn_production_like(rx).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    // 建立 keep-alive client 发一个 request 占住 connection。
+    // client 配 keep-alive,pool 长持 connection
     let client = reqwest::Client::builder()
         .pool_idle_timeout(Some(Duration::from_secs(60)))
+        .pool_max_idle_per_host(1)
         .build()
         .unwrap();
-    // 请求会返非 200(没 provider),但 connection 建立 + 进 keep-alive pool。
-    let _ = client
-        .post(format!("http://{}/responses", addr))
+
+    // req1:建立 connection,完成 response,connection 进 keep-alive pool
+    let url = format!("http://{}/responses", addr);
+    let resp1 = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .body(r#"{"model":"none"}"#)
+        .send()
+        .await
+        .expect("req1 should succeed (proxy running)");
+    let _ = resp1.bytes().await; // drain body so connection returns to pool
+
+    // 触发 stop:listener drop + connections.shutdown() abort 所有 sub-task
+    let _ = tx.send(());
+
+    // 等 abort_all 生效
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // req2 用同一 client(同一 keep-alive pool),期望失败:
+    //   - 如果 reqwest 复用 pool 里的旧 connection → server 端 sub-task 已被
+    //     abort → connection 已 close → client 收 RST → IO error
+    //   - 如果 reqwest 判 connection dead 尝试新 connection → listener 已
+    //     drop → connection refused
+    // **两种情况都必须 error**,不能成功返回 200
+    let resp2 = client
+        .post(&url)
         .header("content-type", "application/json")
         .body(r#"{"model":"none"}"#)
         .send()
         .await;
-
-    // 此刻 axum::serve 内部有 active connection sub-task,如果用
-    // with_graceful_shutdown 会卡这里;用 select! drop 必须立刻 free。
-
-    let _ = tx.send(());
-
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
-    loop {
-        match TcpListener::bind(addr).await {
-            Ok(_) => return,
-            Err(_) if tokio::time::Instant::now() < deadline => {
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            Err(e) => panic!(
-                "port {} not released within 500ms with active keep-alive: {}",
-                addr.port(),
-                e
-            ),
-        }
-    }
+    assert!(
+        resp2.is_err(),
+        "req2 after stop MUST fail (connection abort + port released), got: {:?}",
+        resp2.map(|r| r.status())
+    );
 }

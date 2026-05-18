@@ -10,26 +10,36 @@
 //!   方便从 Tauri 的 `RunEvent::Exit` 同步路径调用而不需要 `block_on`。
 //! - **`start` 是 async**(TcpListener::bind 必需),但锁取放都在显式 scope 里,
 //!   不跨越 await。
-//! - **生命周期**:`start` 时 spawn tokio task 跑 `tokio::select! { axum::serve,
-//!   shutdown_rx }`;`stop` / `stop_silent` 通过 `oneshot::Sender::send(())`
-//!   触发 select 立刻退 → `axum::serve` future 整个 drop → 内部所有 connection
-//!   sub-task + TcpListener **同步销毁** → 端口立即 free。
-//! - **为什么不用 `with_graceful_shutdown`**:它等所有 in-flight connection
-//!   自然 drain 完才释放 listener,在 keep-alive / SSE 长连接场景永远 drain
-//!   不完 → 端口卡占用(2026-05-18 用户真机复现"点停止后还能转发"根因)。
-//!   `select!` drop 强制销毁 future stack,不等 in-flight,代价是 in-flight
-//!   request 被强断 connection reset,但"用户点停止 = 真要停"是合理 trade-off。
+//! - **生命周期**:`start` 时 spawn tokio task 跑自己写的 accept loop —
+//!   每个 connection 用 `JoinSet.spawn` 而**不**是裸 `tokio::spawn`(关键区别)。
+//!   `stop` / `stop_silent` 通过 `oneshot::Sender::send(())` 触发 select 退 →
+//!   listener drop(端口立即 free)→ `joinset.abort_all()` 强制 cancel **所有**
+//!   in-flight connection sub-task → reqwest stream / SSE 同步被打断 →
+//!   client 收 FIN/RST connection 立即断。
+//! - **为什么不用 `axum::serve`**:它内部对每个 connection 用裸 `tokio::spawn`
+//!   出 detached task,外部无 handle,即使 outer future drop sub-task 仍 alive
+//!   继续 process 同 connection 上的 keep-alive request → 用户感知"停止后还
+//!   在转发"(2026-05-18 真机复现:发过 1 条 message 后 stop 转发不受影响,
+//!   PR #209 select! 方案不够强制)。`JoinSet.abort_all()` 是唯一保证所有
+//!   in-flight connection 同步 abort 的方式。
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use axum::body::Body;
+use axum::extract::Request;
 use codex_app_transfer_proxy::{build_router_with_gate, StaticResolver};
 use codex_app_transfer_registry::{config_file, Config};
+use hyper::body::Incoming;
+use hyper_util::rt::{TokioExecutor, TokioIo};
+use hyper_util::server::conn::auto::Builder;
+use hyper_util::service::TowerToHyperService;
 use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
+use tower::ServiceExt;
 
 #[derive(Debug, Serialize, Clone)]
 pub struct ProxyStatus {
@@ -44,24 +54,30 @@ pub struct ProxyStatus {
 
 struct ProxyHandle {
     addr: SocketAddr,
-    /// 停止信号 — `stop` / `stop_silent` send 给跑着的 select! task,触发
-    /// `axum::serve` future drop → listener + 所有 connection sub-task 同步
-    /// 销毁 → 端口立即 free。
+    /// 停止信号 — `stop` / `stop_silent` send 给跑着的 accept-loop task,
+    /// task 收到后 break accept loop → listener drop(端口立即 free)→
+    /// `connections.shutdown().await`(abort_all + 等所有 connection sub-task
+    /// 死)→ in-flight reqwest stream / SSE 全部被打断。
     shutdown_tx: oneshot::Sender<()>,
-    /// axum::serve task 的 JoinHandle — 主路径靠 shutdown_tx + select! drop
-    /// 释放端口,`task.abort()` 作为最后兜底(以防 select 异常)。
+    /// accept-loop task 的 JoinHandle — 主路径靠 shutdown_tx + JoinSet
+    /// abort_all 同步释放端口 + cancel 所有 in-flight,`task.abort()` 作为
+    /// 最后兜底。
     ///
-    /// 历史踩坑(2026-05-18):之前只靠 `with_graceful_shutdown` 在 keep-alive
-    /// / SSE 长连接场景永远 drain 不完 → 端口卡占用 → 用户感知"停了但
-    /// 仍能转发"。现在改成 `tokio::select! { axum::serve, shutdown_rx }`
-    /// 强制 drop future 释放端口,不等 in-flight。
+    /// 历史踩坑(2026-05-18):
+    /// - PR #207 task.abort:tokio cancellation 异步,不传到 spawn 出去的
+    ///   sub-task,且 abort 滞后
+    /// - PR #209 select! + axum::serve:select drop axum::serve future 只断
+    ///   outer accept loop + listener,但 axum::serve 内部用裸 tokio::spawn
+    ///   出的 per-connection sub-task 是 detached,future drop 不影响 →
+    ///   已建立的 connection 仍 process keep-alive request → 端口释放但
+    ///   旧 connection 上"还在转发"。本 PR 自己写 accept loop 用 JoinSet
+    ///   spawn 拿到所有 connection task handle,abort_all 同步 cancel。
     task: JoinHandle<()>,
-    /// Application-level shutdown gate(in-flight request 二保险):虽然 select!
-    /// drop 已经销毁 axum::serve future,但**信号 send → task wake → future
-    /// drop 之间有微小窗口**(纳秒级,但理论存在)。这个 gate 在 stop 时
-    /// 先 set true,router 顶层 middleware 检查后立刻 503 + Connection: close
-    /// 任何窗口内还在 process 的 in-flight request,确保用户看到的语义是
-    /// "stop 之后再没有任何转发响应"。
+    /// Application-level shutdown gate(in-flight request 二保险):虽然
+    /// `connections.shutdown()` 会 abort 所有 sub-task,但 signal send →
+    /// task wake → abort_all 生效之间有窗口。这个 gate 在 stop 时先 set
+    /// true,router 顶层 middleware 检查后立刻 503 + Connection: close 任
+    /// 何窗口内的 req。
     gate: Arc<AtomicBool>,
     gateway_auth: bool,
     provider_count: usize,
@@ -107,21 +123,52 @@ impl ProxyManager {
         // 的后续 request。
         let gate = Arc::new(AtomicBool::new(false));
         let router = build_router_with_gate(Arc::new(snapshot.resolver), gate.clone());
-        let (tx, rx) = oneshot::channel::<()>();
+        let (tx, mut rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            // 强制释放端口:用 select! 把 axum::serve future 跟 shutdown signal
-            // 包一起,signal 来时 select 立刻退 → axum::serve future 整个 drop
-            // → 内部所有 connection sub-task + TcpListener 同步销毁 → 端口
-            // **立即** free。**不**用 `with_graceful_shutdown`,因为它等所有
-            // in-flight connection 自然 drain,在 keep-alive / SSE 长连接场景
-            // 永远 drain 不完 → 端口卡占用(2026-05-18 用户真机复现)。
-            use std::future::IntoFuture;
-            let serve = axum::serve(listener, router.into_make_service()).into_future();
-            tokio::pin!(serve);
-            tokio::select! {
-                _ = &mut serve => {}  // 正常 server lifecycle 退出(listener error 等)
-                _ = rx => {}           // shutdown signal:drop serve_future → listener drop
+            // 自己写 accept loop 替代 axum::serve,关键差异:
+            // 1. per-connection task 用 `JoinSet.spawn` 而**不**是裸
+            //    `tokio::spawn`(axum::serve 内部用裸 spawn,task detached 无 handle)
+            // 2. shutdown signal → break accept loop → listener drop → 然后
+            //    `connections.abort_all()` 同步强制 cancel **所有** in-flight
+            //    connection sub-task → reqwest stream / SSE / keep-alive
+            //    request 全部立即被打断,client 收 FIN/RST connection 关闭
+            // 3. drop(listener) 后端口立即 free,不等任何 in-flight drain
+            //
+            // 之前两种方案都失败(2026-05-18 真机复现):
+            // - PR #207 `task.abort()`:tokio 异步 cancellation 不传到 spawn 出去
+            //   的 sub-task,且 abort 滞后
+            // - PR #209 `tokio::select! { axum::serve, rx }`:select drop axum::serve
+            //   future 只断 outer accept loop + listener,但 axum::serve 内部
+            //   `tokio::spawn` 的 per-connection sub-task 是 detached,future drop
+            //   不影响 → 用户发过 1 条 message 后 stop,connection sub-task 仍 alive
+            //   process 后续 keep-alive request → 看到"停止后还在转发"
+            let mut connections: JoinSet<()> = JoinSet::new();
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut rx => break,
+                    accept = listener.accept() => {
+                        let Ok((stream, _peer)) = accept else { continue };
+                        let io = TokioIo::new(stream);
+                        // Router 是 Service<Request<Body>>,hyper serve_connection
+                        // 要 Service<Request<Incoming>>,用 map_request 桥接 body 类型
+                        let tower_service = router.clone().map_request(
+                            |req: Request<Incoming>| req.map(Body::new),
+                        );
+                        let hyper_service = TowerToHyperService::new(tower_service);
+                        connections.spawn(async move {
+                            let builder = Builder::new(TokioExecutor::new());
+                            let _ = builder
+                                .serve_connection_with_upgrades(io, hyper_service)
+                                .await;
+                        });
+                    }
+                }
             }
+            // Listener 在这里 drop → 端口立即 free(新 connection refused)
+            drop(listener);
+            // 强制 cancel 所有 in-flight connection sub-task — 这是 fix 的核心
+            connections.shutdown().await;
         });
 
         // 3. 落盘 handle(短锁;若期间被另一路径插入,关掉自己回滚)
