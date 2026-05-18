@@ -214,16 +214,16 @@ impl ProxyManager {
                                 _ = conn.as_mut() => {}
                                 _ = conn_cancel.cancelled() => {}
                             }
-                            // sub-task 完成:remove + close 自己 dup fd
-                            #[cfg(unix)]
-                            if let Some(fd) = dup_fd {
-                                let mut fds = active_fds_for_subtask.lock().unwrap();
-                                if let Some(pos) = fds.iter().position(|&f| f == fd) {
-                                    fds.swap_remove(pos);
-                                    drop(fds);
-                                    unsafe { libc::close(fd); }
-                                }
-                            }
+                            // **关键**:sub-task 完成时 **不 close dup_fd**,
+                            // 也 **不从 active_fds remove entry**。原因:hyper
+                            // `auto::Builder` 协商 H2 时会 spawn 独立 h2 task
+                            // 持有 stream,outer sub-task 完成 ≠ inner h2 task
+                            // 完成。如果 outer 完成立刻 close dup_fd,stop_silent
+                            // 失去强制 shutdown 的 fd → ESTABLISHED 不消失。
+                            // dup_fd leak 由 stop_silent / ProxyHandle drop 统一
+                            // 清理(连续 forward 期间累积 fd ~几十,可接受;
+                            // 一次 stop 全清)。
+                            let _ = (active_fds_for_subtask, dup_fd);
                         });
                     }
                 }
@@ -300,11 +300,15 @@ impl ProxyManager {
     /// 这是 stop 链最强保险 —— 不依赖 sub-task 是否真 yield cancel signal。
     #[cfg(unix)]
     fn force_shutdown_active_fds(h: &ProxyHandle) {
-        let fds = h.active_fds.lock().unwrap().clone();
+        // take 整 vec(后续 sub-task 不再访问),然后 shutdown + close 每个 fd。
+        // 现在 sub-task 不 close 自己的 dup fd(避免 outer 完成 ≠ inner h2 完成
+        // 时提前 close 失去 shutdown 能力),fd lifetime 由 stop_silent 接管。
+        let fds = std::mem::take(&mut *h.active_fds.lock().unwrap());
         for fd in fds {
-            unsafe { libc::shutdown(fd, libc::SHUT_RDWR); }
-            // 不 close,让 sub-task 自己 close 自己 entry(避免 fd 双重 close
-            // race 误伤 OS 后续 reassigned fd)。
+            unsafe {
+                libc::shutdown(fd, libc::SHUT_RDWR);
+                libc::close(fd);
+            }
         }
     }
 
