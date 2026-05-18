@@ -22,11 +22,16 @@ use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
-/// 复刻 production(proxy_runner.rs::start)的 accept-loop + JoinSet 模式,
-/// test 路径必须跟 production 一致才能 verify 真实行为。
-async fn spawn_production_like(rx: oneshot::Receiver<()>) -> std::net::SocketAddr {
+/// 复刻 production(proxy_runner.rs::start)的 accept-loop + JoinSet +
+/// CancellationToken per-sub-task select 模式,test 路径必须跟 production
+/// 一致才能 verify 真实行为。
+async fn spawn_production_like(
+    rx: oneshot::Receiver<()>,
+    cancel: CancellationToken,
+) -> std::net::SocketAddr {
     let resolver = Arc::new(StaticResolver::new(None, vec![], None));
     let router = build_router(resolver);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -45,11 +50,15 @@ async fn spawn_production_like(rx: oneshot::Receiver<()>) -> std::net::SocketAdd
                         |req: Request<Incoming>| req.map(Body::new),
                     );
                     let hyper_service = TowerToHyperService::new(tower_service);
+                    let conn_cancel = cancel.child_token();
                     connections.spawn(async move {
                         let builder = Builder::new(TokioExecutor::new());
-                        let _ = builder
-                            .serve_connection_with_upgrades(io, hyper_service)
-                            .await;
+                        let conn = builder.serve_connection_with_upgrades(io, hyper_service);
+                        tokio::pin!(conn);
+                        tokio::select! {
+                            _ = conn.as_mut() => {}
+                            _ = conn_cancel.cancelled() => {}
+                        }
                     });
                 }
             }
@@ -64,7 +73,8 @@ async fn spawn_production_like(rx: oneshot::Receiver<()>) -> std::net::SocketAdd
 #[tokio::test]
 async fn shutdown_releases_port_immediately() {
     let (tx, rx) = oneshot::channel::<()>();
-    let addr = spawn_production_like(rx).await;
+    let cancel = CancellationToken::new();
+    let addr = spawn_production_like(rx, cancel.clone()).await;
 
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert!(
@@ -73,6 +83,7 @@ async fn shutdown_releases_port_immediately() {
         addr.port()
     );
 
+    cancel.cancel();
     let _ = tx.send(());
 
     let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
@@ -95,7 +106,8 @@ async fn shutdown_releases_port_immediately() {
 #[tokio::test]
 async fn stop_aborts_inflight_keepalive_connection() {
     let (tx, rx) = oneshot::channel::<()>();
-    let addr = spawn_production_like(rx).await;
+    let cancel = CancellationToken::new();
+    let addr = spawn_production_like(rx, cancel.clone()).await;
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // client 配 keep-alive,pool 长持 connection
@@ -116,10 +128,12 @@ async fn stop_aborts_inflight_keepalive_connection() {
         .expect("req1 should succeed (proxy running)");
     let _ = resp1.bytes().await; // drain body so connection returns to pool
 
-    // 触发 stop:listener drop + connections.shutdown() abort 所有 sub-task
+    // 触发 stop:cancel.cancel() 同步 wake sub-task select → drop conn →
+    // socket close;send(()) 让 accept loop break → listener drop
+    cancel.cancel();
     let _ = tx.send(());
 
-    // 等 abort_all 生效
+    // 等 sub-task select arm fire + conn drop + TCP FIN/RST 发出
     tokio::time::sleep(Duration::from_millis(200)).await;
 
     // req2 用同一 client(同一 keep-alive pool),期望失败:

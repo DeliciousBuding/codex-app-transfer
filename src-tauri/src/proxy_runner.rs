@@ -39,6 +39,7 @@ use serde::Serialize;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
 use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 #[derive(Debug, Serialize, Clone)]
@@ -55,29 +56,38 @@ pub struct ProxyStatus {
 struct ProxyHandle {
     addr: SocketAddr,
     /// 停止信号 — `stop` / `stop_silent` send 给跑着的 accept-loop task,
-    /// task 收到后 break accept loop → listener drop(端口立即 free)→
-    /// `connections.shutdown().await`(abort_all + 等所有 connection sub-task
-    /// 死)→ in-flight reqwest stream / SSE 全部被打断。
+    /// task 收到后 break accept loop → drop listener(端口 free)→ 跑
+    /// `connections.shutdown().await` 等所有 sub-task die。
     shutdown_tx: oneshot::Sender<()>,
-    /// accept-loop task 的 JoinHandle — 主路径靠 shutdown_tx + JoinSet
-    /// abort_all 同步释放端口 + cancel 所有 in-flight,`task.abort()` 作为
-    /// 最后兜底。
+    /// **关键** in-flight connection cancel token —— 每个 connection sub-task
+    /// 在 `tokio::select! { conn.await, cancel.cancelled().await }` 里跑;
+    /// stop_silent 调 `cancel.cancel()` 同步 wake 所有 sub-task 的 cancelled
+    /// arm → select arm 命中 → drop conn future → hyper connection drop →
+    /// **TCP socket 同步 close → client 收 FIN/RST 立即断**。
+    ///
+    /// 为什么不能只靠 `task.abort()`:tokio abort 是 schedule cancellation,
+    /// task 必须在 yield point 才生效。reqwest stream / SSE await upstream
+    /// response 可能很久不 yield,abort 滞后到数秒甚至永远。
+    /// `CancellationToken.cancel()` 立刻 wake 所有 `cancelled()` listener,
+    /// select arm 立即 ready 触发 drop,不依赖 sub-task 主动 yield。
+    cancel: CancellationToken,
+    /// accept-loop task 的 JoinHandle —— 主路径靠 shutdown_tx + cancel 协同
+    /// 让 task 自然跑完(break loop + drop listener + 等 sub-task die),
+    /// **stop_silent 不调 task.abort()**(否则会抢先 cancel task,task 跑不
+    /// 到 connections.shutdown().await,sub-task cancel 链断)。
     ///
     /// 历史踩坑(2026-05-18):
-    /// - PR #207 task.abort:tokio cancellation 异步,不传到 spawn 出去的
-    ///   sub-task,且 abort 滞后
-    /// - PR #209 select! + axum::serve:select drop axum::serve future 只断
-    ///   outer accept loop + listener,但 axum::serve 内部用裸 tokio::spawn
-    ///   出的 per-connection sub-task 是 detached,future drop 不影响 →
-    ///   已建立的 connection 仍 process keep-alive request → 端口释放但
-    ///   旧 connection 上"还在转发"。本 PR 自己写 accept loop 用 JoinSet
-    ///   spawn 拿到所有 connection task handle,abort_all 同步 cancel。
+    /// - PR #207 task.abort:同上,reqwest stream 不 yield → abort 永远等
+    /// - PR #209 select! + axum::serve:future drop 不传到 axum 内裸 spawn
+    ///   出的 connection sub-task
+    /// - PR #209 第二 commit JoinSet + abort_all:对了一半 —— JoinSet
+    ///   拿到 handle 了,**但 stop_silent 同时调 task.abort() 抢先 cancel
+    ///   task,task 跑不到 connections.shutdown() → sub-task 仍 detached**
+    ///   (2026-05-18 真机第二次复现根因)
     task: JoinHandle<()>,
-    /// Application-level shutdown gate(in-flight request 二保险):虽然
-    /// `connections.shutdown()` 会 abort 所有 sub-task,但 signal send →
-    /// task wake → abort_all 生效之间有窗口。这个 gate 在 stop 时先 set
-    /// true,router 顶层 middleware 检查后立刻 503 + Connection: close 任
-    /// 何窗口内的 req。
+    /// Application-level shutdown gate(in-flight request 三保险):cancel
+    /// → sub-task select wake → conn drop 有微小窗口,gate 在 stop 时同步
+    /// set true,router 顶层 middleware 检查后立刻 503 + Connection: close。
     gate: Arc<AtomicBool>,
     gateway_auth: bool,
     provider_count: usize,
@@ -124,24 +134,30 @@ impl ProxyManager {
         let gate = Arc::new(AtomicBool::new(false));
         let router = build_router_with_gate(Arc::new(snapshot.resolver), gate.clone());
         let (tx, mut rx) = oneshot::channel::<()>();
+        let cancel = CancellationToken::new();
+        let cancel_for_task = cancel.clone();
         let task = tokio::spawn(async move {
-            // 自己写 accept loop 替代 axum::serve,关键差异:
-            // 1. per-connection task 用 `JoinSet.spawn` 而**不**是裸
-            //    `tokio::spawn`(axum::serve 内部用裸 spawn,task detached 无 handle)
-            // 2. shutdown signal → break accept loop → listener drop → 然后
-            //    `connections.abort_all()` 同步强制 cancel **所有** in-flight
-            //    connection sub-task → reqwest stream / SSE / keep-alive
-            //    request 全部立即被打断,client 收 FIN/RST connection 关闭
-            // 3. drop(listener) 后端口立即 free,不等任何 in-flight drain
+            // 自己写 accept loop 替代 axum::serve,真正强制释放方案:
             //
-            // 之前两种方案都失败(2026-05-18 真机复现):
-            // - PR #207 `task.abort()`:tokio 异步 cancellation 不传到 spawn 出去
-            //   的 sub-task,且 abort 滞后
-            // - PR #209 `tokio::select! { axum::serve, rx }`:select drop axum::serve
-            //   future 只断 outer accept loop + listener,但 axum::serve 内部
-            //   `tokio::spawn` 的 per-connection sub-task 是 detached,future drop
-            //   不影响 → 用户发过 1 条 message 后 stop,connection sub-task 仍 alive
-            //   process 后续 keep-alive request → 看到"停止后还在转发"
+            // 1. per-connection task 用 `JoinSet.spawn`(拿 handle)+ **每个
+            //    sub-task 内 select { conn.await, cancel.cancelled() }**
+            //    —— cancel 来时 select arm 立刻 wake,drop conn future →
+            //    hyper connection drop → **TCP socket 同步 close** →
+            //    client 收 FIN/RST 立即断
+            //
+            // 2. stop_silent 调 `cancel.cancel()` 同步触发所有 sub-task →
+            //    sub-task naturally complete → connections.shutdown() 返
+            //
+            // 3. 关键:**stop_silent 不调 task.abort()** —— 之前两个 commit
+            //    fail 在这里(task.abort 抢先 cancel server task,task 跑不
+            //    到 connections.shutdown(),sub-task 仍 detached)
+            //
+            // 真机复现历史(2026-05-18):
+            // - PR #207 task.abort:reqwest stream 不 yield → abort 永远等
+            // - PR #209 select! + axum::serve:future drop 不传到 axum 内
+            //   裸 spawn 的 sub-task
+            // - PR #209 JoinSet + abort_all without cancel:task.abort 抢先,
+            //   shutdown() 跑不到
             let mut connections: JoinSet<()> = JoinSet::new();
             loop {
                 tokio::select! {
@@ -150,31 +166,35 @@ impl ProxyManager {
                     accept = listener.accept() => {
                         let Ok((stream, _peer)) = accept else { continue };
                         let io = TokioIo::new(stream);
-                        // Router 是 Service<Request<Body>>,hyper serve_connection
-                        // 要 Service<Request<Incoming>>,用 map_request 桥接 body 类型
                         let tower_service = router.clone().map_request(
                             |req: Request<Incoming>| req.map(Body::new),
                         );
                         let hyper_service = TowerToHyperService::new(tower_service);
+                        let conn_cancel = cancel_for_task.child_token();
                         connections.spawn(async move {
                             let builder = Builder::new(TokioExecutor::new());
-                            let _ = builder
-                                .serve_connection_with_upgrades(io, hyper_service)
-                                .await;
+                            let conn = builder.serve_connection_with_upgrades(io, hyper_service);
+                            tokio::pin!(conn);
+                            tokio::select! {
+                                _ = conn.as_mut() => {}
+                                _ = conn_cancel.cancelled() => {
+                                    // cancel 触发 → select 退 → conn 在 scope
+                                    // 退出时 drop → socket close → client 断
+                                }
+                            }
                         });
                     }
                 }
             }
-            // Listener 在这里 drop → 端口立即 free(新 connection refused)
-            drop(listener);
-            // 强制 cancel 所有 in-flight connection sub-task — 这是 fix 的核心
-            connections.shutdown().await;
+            drop(listener); // 端口立即 free
+            connections.shutdown().await; // cancel 已触发,sub-task 应快速 die
         });
 
         // 3. 落盘 handle(短锁;若期间被另一路径插入,关掉自己回滚)
         let new_handle = ProxyHandle {
             addr,
             shutdown_tx: tx,
+            cancel,
             task,
             gate,
             gateway_auth: snapshot.gateway_auth,
@@ -183,11 +203,12 @@ impl ProxyManager {
         };
         let mut guard = self.handle.lock().unwrap();
         if guard.is_some() {
-            // race condition,自己的 listener 让出去:set gate + send shutdown + abort task
-            // (gate set 先于 abort 让 in-flight sub-task 立刻拒新 request)
+            // race condition,自己的 listener 让出去:gate + cancel + signal,
+            // task 自然跑完 connections.shutdown() 释放端口。
             new_handle.gate.store(true, Ordering::Release);
+            new_handle.cancel.cancel();
             let _ = new_handle.shutdown_tx.send(());
-            new_handle.task.abort();
+            new_handle.task.abort(); // race 路径用 abort 兜底
             return Err("proxy already started by another path".to_owned());
         }
         *guard = Some(new_handle);
@@ -200,40 +221,42 @@ impl ProxyManager {
         })
     }
 
-    /// 触发 graceful shutdown 后立刻 abort task 释放端口。未 running 时报错。
+    /// 强制停转发(同步 fn,fire-and-forget,不等 task 自然完成)。
     ///
-    /// **为什么两步**:`shutdown_tx.send(())` 给 axum graceful drain 机会让
-    /// 正常完成的 request 跑完;紧跟 `task.abort()` 同步 drop server future
-    /// → listener drop → **端口立刻释放**,不会卡在 in-flight SSE / long
-    /// polling / hung connection 上(那种 connection 可能永远 drain 不完)。
-    /// 代价:in-flight connection 被强断,client 见 connection reset —
-    /// 但"用户点停止 = 真要停",这是合理 trade-off。
+    /// 顺序(每步同步立即生效):
+    /// 1. `gate.store(true)` —— in-flight middleware 立刻 503
+    /// 2. `cancel.cancel()` —— 所有 connection sub-task 的 select arm
+    ///    立刻 wake → drop conn → **socket close**(client 收 FIN/RST)
+    /// 3. `shutdown_tx.send(())` —— 唤醒 accept loop break → drop listener
+    ///    → 端口 free
+    ///
+    /// **不**调 `task.abort()` —— 否则会抢先 cancel server task,task 跑不
+    /// 到 `connections.shutdown().await`,sub-task cancel 链断(2026-05-18
+    /// PR #209 第二 commit fail 根因)。
     #[allow(dead_code)]
     pub fn stop(&self) -> Result<(), String> {
         let mut guard = self.handle.lock().unwrap();
         match guard.take() {
             Some(h) => {
-                // 顺序重要:gate 先 set true 让 in-flight sub-task 下次
-                // process request 立刻 hit middleware 503,然后再 send graceful
-                // shutdown signal + abort task 释放端口。
                 h.gate.store(true, Ordering::Release);
+                h.cancel.cancel();
                 let _ = h.shutdown_tx.send(());
-                h.task.abort();
+                drop(h.task); // 让 task 自然完成,不 abort
                 Ok(())
             }
             None => Err("proxy is not running".to_owned()),
         }
     }
 
-    /// 静默 stop:用于 app exit / 异常路径,不报错只尽力关。
-    /// 同样走 gate set true + send signal + abort 三保险确保 in-flight
-    /// keep-alive connection 也被 reject + 端口释放(详见 [`Self::stop`])。
+    /// 静默 stop:app exit / 异常路径用,不报错只尽力关。同样走 gate +
+    /// cancel + signal 三步同步触发,**不**调 task.abort(详见 [`Self::stop`])。
     pub fn stop_silent(&self) {
         let mut guard = self.handle.lock().unwrap();
         if let Some(h) = guard.take() {
             h.gate.store(true, Ordering::Release);
+            h.cancel.cancel();
             let _ = h.shutdown_tx.send(());
-            h.task.abort();
+            drop(h.task); // 让 task 自然完成,不 abort
         }
     }
 
