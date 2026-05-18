@@ -23,6 +23,16 @@ use axum::{
 pub use state::AdminState;
 
 pub fn build_app_router(state: AdminState) -> Router {
+    build_app_router_inner(state, true)
+}
+
+/// Build the admin router without a static-file fallback.
+/// For server mode where the fallback is handled by the proxy router merge.
+pub fn build_app_router_no_fallback(state: AdminState) -> Router {
+    build_app_router_inner(state, false)
+}
+
+fn build_app_router_inner(state: AdminState, with_fallback: bool) -> Router {
     let router = Router::new()
         // 单实例握手
         .route("/api/instance-info", get(handlers::common::instance_info))
@@ -185,10 +195,14 @@ pub fn build_app_router(state: AdminState) -> Router {
 
     let router = router
         // Antigravity OAuth (login / status / logout / cancel)
-        .merge(handlers::antigravity_oauth::routes())
-        // 静态文件兜底
-        .fallback(static_files::serve_static)
-        .with_state(state);
+        .merge(handlers::antigravity_oauth::routes());
 
+    let router = if with_fallback {
+        router
+            .fallback(static_files::serve_static)
+            .with_state(state)
+    } else {
+        router.with_state(state)
+    };
     router
 }

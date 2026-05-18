@@ -95,12 +95,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let admin_state = AdminState {
         proxy_manager: proxy_manager.clone(),
     };
-    let admin_router = admin::build_app_router(admin_state);
+    let admin_router = admin::build_app_router_no_fallback(admin_state);
     let proxy_router = build_router(proxy_resolver);
 
-    // Merge: admin routes first (API + frontend), proxy fallback catches /responses etc.
-    let app = admin_router
-        .merge(proxy_router)
+    // Merge: proxy router has the fallback (forward handler), admin routes take priority
+    let app = proxy_router
+        .merge(admin_router)
         .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .layer(TraceLayer::new_for_http());
 
