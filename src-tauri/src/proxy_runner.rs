@@ -10,14 +10,21 @@
 //!   方便从 Tauri 的 `RunEvent::Exit` 同步路径调用而不需要 `block_on`。
 //! - **`start` 是 async**(TcpListener::bind 必需),但锁取放都在显式 scope 里,
 //!   不跨越 await。
-//! - **生命周期**:`start` 时 spawn tokio task 持有 `axum::serve` future,附带
-//!   `with_graceful_shutdown(oneshot::Receiver<()>)`;`stop` / `stop_silent`
-//!   通过 `oneshot::Sender::send(())` 触发 graceful 关停。
+//! - **生命周期**:`start` 时 spawn tokio task 跑 `tokio::select! { axum::serve,
+//!   shutdown_rx }`;`stop` / `stop_silent` 通过 `oneshot::Sender::send(())`
+//!   触发 select 立刻退 → `axum::serve` future 整个 drop → 内部所有 connection
+//!   sub-task + TcpListener **同步销毁** → 端口立即 free。
+//! - **为什么不用 `with_graceful_shutdown`**:它等所有 in-flight connection
+//!   自然 drain 完才释放 listener,在 keep-alive / SSE 长连接场景永远 drain
+//!   不完 → 端口卡占用(2026-05-18 用户真机复现"点停止后还能转发"根因)。
+//!   `select!` drop 强制销毁 future stack,不等 in-flight,代价是 in-flight
+//!   request 被强断 connection reset,但"用户点停止 = 真要停"是合理 trade-off。
 
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use codex_app_transfer_proxy::{build_router, StaticResolver};
+use codex_app_transfer_proxy::{build_router_with_gate, StaticResolver};
 use codex_app_transfer_registry::{config_file, Config};
 use serde::Serialize;
 use tokio::net::TcpListener;
@@ -37,16 +44,25 @@ pub struct ProxyStatus {
 
 struct ProxyHandle {
     addr: SocketAddr,
+    /// 停止信号 — `stop` / `stop_silent` send 给跑着的 select! task,触发
+    /// `axum::serve` future drop → listener + 所有 connection sub-task 同步
+    /// 销毁 → 端口立即 free。
     shutdown_tx: oneshot::Sender<()>,
-    /// axum::serve task 的 JoinHandle — stop / stop_silent 在发 graceful
-    /// shutdown 信号**之后**立刻 task.abort() 强制 drop server future,
-    /// listener 同步 drop → 端口立刻释放。
+    /// axum::serve task 的 JoinHandle — 主路径靠 shutdown_tx + select! drop
+    /// 释放端口,`task.abort()` 作为最后兜底(以防 select 异常)。
     ///
-    /// 修 silent failure:graceful_shutdown 等所有 in-flight connection
-    /// 完成才 drop listener,SSE / long-polling / hung connection 可能
-    /// 永远等不到 → 端口不释放,但 UI / log 已 "stopped" → 用户感知
-    /// "停了但端口还占"。abort 保证 stop_silent 同步返时端口必释放。
+    /// 历史踩坑(2026-05-18):之前只靠 `with_graceful_shutdown` 在 keep-alive
+    /// / SSE 长连接场景永远 drain 不完 → 端口卡占用 → 用户感知"停了但
+    /// 仍能转发"。现在改成 `tokio::select! { axum::serve, shutdown_rx }`
+    /// 强制 drop future 释放端口,不等 in-flight。
     task: JoinHandle<()>,
+    /// Application-level shutdown gate(in-flight request 二保险):虽然 select!
+    /// drop 已经销毁 axum::serve future,但**信号 send → task wake → future
+    /// drop 之间有微小窗口**(纳秒级,但理论存在)。这个 gate 在 stop 时
+    /// 先 set true,router 顶层 middleware 检查后立刻 503 + Connection: close
+    /// 任何窗口内还在 process 的 in-flight request,确保用户看到的语义是
+    /// "stop 之后再没有任何转发响应"。
+    gate: Arc<AtomicBool>,
     gateway_auth: bool,
     provider_count: usize,
     active_provider: Option<String>,
@@ -86,14 +102,26 @@ impl ProxyManager {
         let addr = listener
             .local_addr()
             .map_err(|e| format!("cannot read listener address: {e}"))?;
-        let router = build_router(Arc::new(snapshot.resolver));
+        // Application-level gate:start 时 false(放行),stop 时 set true →
+        // router 顶层 middleware 检查后 503 + close 任何 in-flight sub-task
+        // 的后续 request。
+        let gate = Arc::new(AtomicBool::new(false));
+        let router = build_router_with_gate(Arc::new(snapshot.resolver), gate.clone());
         let (tx, rx) = oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, router.into_make_service())
-                .with_graceful_shutdown(async move {
-                    let _ = rx.await;
-                })
-                .await;
+            // 强制释放端口:用 select! 把 axum::serve future 跟 shutdown signal
+            // 包一起,signal 来时 select 立刻退 → axum::serve future 整个 drop
+            // → 内部所有 connection sub-task + TcpListener 同步销毁 → 端口
+            // **立即** free。**不**用 `with_graceful_shutdown`,因为它等所有
+            // in-flight connection 自然 drain,在 keep-alive / SSE 长连接场景
+            // 永远 drain 不完 → 端口卡占用(2026-05-18 用户真机复现)。
+            use std::future::IntoFuture;
+            let serve = axum::serve(listener, router.into_make_service()).into_future();
+            tokio::pin!(serve);
+            tokio::select! {
+                _ = &mut serve => {}  // 正常 server lifecycle 退出(listener error 等)
+                _ = rx => {}           // shutdown signal:drop serve_future → listener drop
+            }
         });
 
         // 3. 落盘 handle(短锁;若期间被另一路径插入,关掉自己回滚)
@@ -101,14 +129,16 @@ impl ProxyManager {
             addr,
             shutdown_tx: tx,
             task,
+            gate,
             gateway_auth: snapshot.gateway_auth,
             provider_count: snapshot.provider_count,
             active_provider: snapshot.active_provider.clone(),
         };
         let mut guard = self.handle.lock().unwrap();
         if guard.is_some() {
-            // race condition,自己的 listener 让出去:发 shutdown + abort task
-            // (abort 同步 drop listener,端口立刻释放,不依赖 graceful drain)
+            // race condition,自己的 listener 让出去:set gate + send shutdown + abort task
+            // (gate set 先于 abort 让 in-flight sub-task 立刻拒新 request)
+            new_handle.gate.store(true, Ordering::Release);
             let _ = new_handle.shutdown_tx.send(());
             new_handle.task.abort();
             return Err("proxy already started by another path".to_owned());
@@ -136,6 +166,10 @@ impl ProxyManager {
         let mut guard = self.handle.lock().unwrap();
         match guard.take() {
             Some(h) => {
+                // 顺序重要:gate 先 set true 让 in-flight sub-task 下次
+                // process request 立刻 hit middleware 503,然后再 send graceful
+                // shutdown signal + abort task 释放端口。
+                h.gate.store(true, Ordering::Release);
                 let _ = h.shutdown_tx.send(());
                 h.task.abort();
                 Ok(())
@@ -145,10 +179,12 @@ impl ProxyManager {
     }
 
     /// 静默 stop:用于 app exit / 异常路径,不报错只尽力关。
-    /// 同样走 send signal + abort 双保险确保端口释放(详见 [`Self::stop`])。
+    /// 同样走 gate set true + send signal + abort 三保险确保 in-flight
+    /// keep-alive connection 也被 reject + 端口释放(详见 [`Self::stop`])。
     pub fn stop_silent(&self) {
         let mut guard = self.handle.lock().unwrap();
         if let Some(h) = guard.take() {
+            h.gate.store(true, Ordering::Release);
             let _ = h.shutdown_tx.send(());
             h.task.abort();
         }

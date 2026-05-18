@@ -1,12 +1,16 @@
 //! axum router 构造与启动 helper.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use axum::{
     body::{to_bytes, Body},
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
         State,
     },
-    http::{HeaderMap, Method, Request},
+    http::{HeaderMap, Method, Request, StatusCode},
+    middleware::{self, Next},
     response::IntoResponse,
     routing::{any, get},
     Router,
@@ -19,7 +23,28 @@ use crate::resolver::SharedResolver;
 
 /// 把所有方法 / 所有路径都路由到 `forward_handler`(裸代理 + B1 路由 + B2 鉴权改写)。
 /// Stage 3 起此 router 会再叠 adapter 中间件(provider 协议转换)。
+///
+/// 测试用入口,默认 gate 永远 false(不 shutdown)。production 路径用
+/// [`build_router_with_gate`] 传真 gate 接 ProxyManager.stop。
 pub fn build_router(resolver: SharedResolver) -> Router {
+    build_router_with_gate(resolver, Arc::new(AtomicBool::new(false)))
+}
+
+/// 同 [`build_router`] 但加 application-level shutdown gate(2026-05-18 加,
+/// 修真停止 bug)。router 顶层 middleware 每个请求 check `stopped` flag,
+/// true 时立刻返 503 + `Connection: close`,**不**进 forward_handler。
+///
+/// **为什么需要 application-level gate**:`axum::serve` 内部对每个 accept
+/// 的 connection 用 `tokio::spawn` 启独立 sub-task。outer serve task 被
+/// abort 时**只**停 accept loop + drop listener(端口释放 ✓),但**已 accepted
+/// 的 keep-alive connection sub-task 仍独立 alive**,client 用同一 connection
+/// 发后续 keep-alive request 仍 hit forward_handler → 用户感知"停止转发后
+/// 还在转发"(2026-05-18 user 真机实测复现,PR #207 单 abort 不够)。
+///
+/// 加这个 gate 后:stop 把 flag set true → 任何 in-flight sub-task 下次
+/// process request 立刻 hit middleware → 503 + close connection → client
+/// 收到响应后 keep-alive pool 弃掉这条 connection,真正停止 forward。
+pub fn build_router_with_gate(resolver: SharedResolver, stopped: Arc<AtomicBool>) -> Router {
     let state = ProxyState::new(resolver);
     Router::new()
         .route(
@@ -42,6 +67,25 @@ pub fn build_router(resolver: SharedResolver) -> Router {
         )
         .fallback(any(forward_handler))
         .with_state(state)
+        .layer(middleware::from_fn_with_state(stopped, shutdown_gate))
+}
+
+/// router 顶层 middleware: 转发已被停止时立刻返 503 + Connection: close,
+/// 不进 forward_handler。详见 [`build_router`] doc 的 "为什么需要" 段。
+async fn shutdown_gate(
+    State(stopped): State<Arc<AtomicBool>>,
+    req: Request<Body>,
+    next: Next,
+) -> axum::response::Response {
+    if stopped.load(Ordering::Acquire) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [("connection", "close")],
+            "proxy stopped",
+        )
+            .into_response();
+    }
+    next.run(req).await
 }
 
 async fn responses_websocket_handler(
