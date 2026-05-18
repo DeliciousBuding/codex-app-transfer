@@ -8,18 +8,31 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
-# 二进制入口
+# 共享库(admin API + proxy runner + telemetry bridge)
+# desktop binary 与 server binary 共用此 lib
+[lib]
+name = "codex_app_transfer_app"
+path = "src/lib.rs"
+
+# Tauri 桌面二进制
 [[bin]]
 name = "codex-app-transfer"
 path = "src/main.rs"
+required-features = ["desktop"]
+
+# 独立服务器二进制(不含 Tauri)
+[[bin]]
+name = "codex-app-transfer-server"
+path = "src/bin/server.rs"
+required-features = ["server"]
 
 [build-dependencies]
-tauri-build = { version = "2", features = [] }
+tauri-build = { version = "2", features = [], optional = true }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
-tauri-plugin-shell = "2"
-tauri-plugin-single-instance = "2"
+tauri = { version = "2", features = ["tray-icon"], optional = true }
+tauri-plugin-shell = { version = "2", optional = true }
+tauri-plugin-single-instance = { version = "2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 codex-app-transfer-registry = { path = "../crates/registry" }
@@ -56,6 +69,9 @@ fs2 = "0.4"
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 # futures 用于 WebSocket Stream/Sink 的 split 操作
 futures = "0.3"
+# server feature deps:CLI 参数解析 + HTTP 中间件
+clap = { version = "4", features = ["derive", "env"], optional = true }
+tower-http = { version = "0.6", features = ["cors", "trace"], optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
@@ -74,6 +90,15 @@ windows = { version = "0.59", features = [
 ] }
 
 [features]
-# 默认空,自定义 protocol 在打包时启用
-default = ["custom-protocol"]
+default = ["desktop", "custom-protocol"]
+desktop = [
+    "dep:tauri",
+    "dep:tauri-build",
+    "dep:tauri-plugin-shell",
+    "dep:tauri-plugin-single-instance",
+]
 custom-protocol = ["tauri/custom-protocol"]
+server = [
+    "dep:clap",
+    "dep:tower-http",
+]

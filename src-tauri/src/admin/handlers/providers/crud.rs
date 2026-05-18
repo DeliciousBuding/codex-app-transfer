@@ -17,6 +17,7 @@ use super::super::super::registry_io::{
 };
 use super::super::super::state::AdminState;
 use super::super::common::err;
+#[cfg(feature = "desktop")]
 use super::super::desktop::switch_provider_and_sync;
 use super::{fresh_provider_id, provider_index};
 
@@ -474,7 +475,10 @@ pub async fn set_default_provider(
     State(state): State<AdminState>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    #[cfg(feature = "desktop")]
     let result = switch_provider_and_sync(state.proxy_manager.clone(), id).await;
+    #[cfg(not(feature = "desktop"))]
+    let result = set_default_provider_config_only(&id);
     if result.get("success").and_then(|v| v.as_bool()) == Some(true) {
         Json(result).into_response()
     } else {
@@ -493,6 +497,35 @@ pub async fn set_default_provider(
         )
         .into_response()
     }
+}
+
+/// Server mode: update activeProvider in config only, no desktop sync.
+#[cfg(not(feature = "desktop"))]
+fn set_default_provider_config_only(provider_id: &str) -> serde_json::Value {
+    use super::super::super::registry_io::{with_config_write, ConfigMutation};
+    let result: Result<serde_json::Value, String> = with_config_write(|cfg| {
+        let providers = cfg.get("providers").and_then(|v| v.as_array());
+        let found = providers
+            .map(|a| a.iter().any(|p| p.get("id").and_then(|v| v.as_str()) == Some(provider_id)))
+            .unwrap_or(false);
+        if !found {
+            return Ok(ConfigMutation::Unchanged(serde_json::json!({
+                "success": false,
+                "message": "provider not found"
+            })));
+        }
+        cfg.as_object_mut()
+            .unwrap()
+            .insert("activeProvider".into(), serde_json::Value::String(provider_id.to_owned()));
+        Ok(ConfigMutation::Modified(serde_json::json!({
+            "success": true,
+            "activeProviderId": provider_id,
+            "message": "active provider updated",
+        })))
+    });
+    result.unwrap_or_else(|e| {
+        serde_json::json!({"success": false, "message": format!("config write failed: {e}")})
+    })
 }
 
 pub async fn activate_provider(

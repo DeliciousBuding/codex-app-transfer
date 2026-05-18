@@ -12,9 +12,11 @@
 
 pub mod antigravity_oauth;
 pub mod common;
+#[cfg(feature = "desktop")]
 pub mod desktop;
 pub mod feedback;
 pub mod gemini_oauth;
+#[cfg(feature = "desktop")]
 pub mod plugin_unlock;
 pub mod providers;
 pub mod proxy;

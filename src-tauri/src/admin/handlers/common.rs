@@ -10,6 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+#[cfg(feature = "desktop")]
 use codex_app_transfer_codex_integration::{has_snapshot, CodexPaths};
 use codex_app_transfer_registry::RawConfig;
 use serde_json::{json, Value};
@@ -125,33 +126,48 @@ pub async fn status(State(state): State<AdminState>) -> impl IntoResponse {
         .map(|s| s.to_owned());
     let proxy_port = super::proxy::read_proxy_port(&cfg);
     let proxy_status = state.proxy_manager.status();
-    let codex_paths = CodexPaths::from_home_env().ok();
-    let codex_configured = codex_paths.as_ref().map(has_snapshot).unwrap_or(false);
-    let actual_base_url = codex_paths
-        .as_ref()
-        .and_then(|paths| super::desktop::read_codex_toml_root_string(paths, "openai_base_url"));
-    let actual_api_key_present = codex_paths
-        .as_ref()
-        .map(super::desktop::codex_openai_api_key_present)
-        .unwrap_or(false);
-    let desktop_target = super::desktop::desktop_target_for_active_provider(&cfg);
-    let desktop_health = super::desktop::desktop_health(
-        codex_paths.as_ref(),
-        codex_configured,
-        actual_base_url.as_deref(),
-        actual_api_key_present,
-        desktop_target.as_ref(),
-    );
+
+    #[cfg(feature = "desktop")]
+    let (codex_configured, desktop_mode, desktop_requires_proxy, desktop_health) = {
+        let codex_paths = CodexPaths::from_home_env().ok();
+        let codex_configured = codex_paths.as_ref().map(has_snapshot).unwrap_or(false);
+        let actual_base_url = codex_paths
+            .as_ref()
+            .and_then(|paths| super::desktop::read_codex_toml_root_string(paths, "openai_base_url"));
+        let actual_api_key_present = codex_paths
+            .as_ref()
+            .map(super::desktop::codex_openai_api_key_present)
+            .unwrap_or(false);
+        let desktop_target = super::desktop::desktop_target_for_active_provider(&cfg);
+        let desktop_mode = desktop_target
+            .as_ref()
+            .map(|t| t.mode)
+            .unwrap_or("unconfigured");
+        let desktop_requires_proxy = desktop_target
+            .as_ref()
+            .map(|t| t.requires_proxy)
+            .unwrap_or(false);
+        let desktop_health = super::desktop::desktop_health(
+            codex_paths.as_ref(),
+            codex_configured,
+            actual_base_url.as_deref(),
+            actual_api_key_present,
+            desktop_target.as_ref(),
+        );
+        (codex_configured, desktop_mode, desktop_requires_proxy, desktop_health)
+    };
+
+    #[cfg(not(feature = "desktop"))]
+    let (codex_configured, desktop_mode, desktop_requires_proxy, desktop_health) = {
+        (false, "server", false, serde_json::json!({"status": "server_mode"}))
+    };
 
     Json(json!({
         "desktopConfigured": codex_configured,
         "proxyRunning": proxy_status.running,
         "proxyPort": proxy_port,
-        "desktopMode": desktop_target.as_ref().map(|target| target.mode).unwrap_or("unconfigured"),
-        "desktopRequiresProxy": desktop_target
-            .as_ref()
-            .map(|target| target.requires_proxy)
-            .unwrap_or(false),
+        "desktopMode": desktop_mode,
+        "desktopRequiresProxy": desktop_requires_proxy,
         "activeProvider": active,
         "activeProviderId": active_id,
         "providerCount": providers_count,

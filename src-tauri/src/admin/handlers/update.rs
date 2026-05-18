@@ -751,6 +751,7 @@ pub async fn update_check(Query(query): Query<UpdateCheckQuery>) -> impl IntoRes
     }
 }
 
+#[cfg(feature = "desktop")]
 pub async fn update_install(body: Option<Json<UpdateInstallInput>>) -> impl IntoResponse {
     // follow-up #35 a: macOS translocation 前置检查 — 当前 .app 在 .dmg
     // 临时挂载点跑时 hard fail,提示用户先拖到 /Applications/ 再升级。

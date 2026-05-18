@@ -3,12 +3,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-mod admin;
-mod codex_plugin_unlocker;
-mod proxy_runner;
-mod telemetry_bridge;
-#[cfg(target_os = "windows")]
-mod windows_msix;
+use codex_app_transfer_app::{admin, proxy_runner, telemetry_bridge};
 
 use std::sync::Arc;
 

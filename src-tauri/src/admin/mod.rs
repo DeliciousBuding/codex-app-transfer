@@ -23,7 +23,7 @@ use axum::{
 pub use state::AdminState;
 
 pub fn build_app_router(state: AdminState) -> Router {
-    Router::new()
+    let router = Router::new()
         // 单实例握手
         .route("/api/instance-info", get(handlers::common::instance_info))
         .route(
@@ -99,8 +99,11 @@ pub fn build_app_router(state: AdminState) -> Router {
         .route(
             "/api/presets",
             get(handlers::providers::presets::list_presets),
-        )
-        // Desktop / Codex CLI
+        );
+
+    // Desktop / Codex CLI routes — only in desktop feature (Tauri build)
+    #[cfg(feature = "desktop")]
+    let router = router
         .route(
             "/api/desktop/status",
             get(handlers::desktop::desktop_status),
@@ -125,7 +128,9 @@ pub fn build_app_router(state: AdminState) -> Router {
         .route(
             "/api/desktop/snapshot-status",
             get(handlers::desktop::desktop_snapshot_status),
-        )
+        );
+
+    let router = router
         // Proxy lifecycle
         .route("/api/version", get(handlers::common::version))
         .route("/api/proxy/start", post(handlers::proxy::start_proxy))
@@ -147,11 +152,17 @@ pub fn build_app_router(state: AdminState) -> Router {
             get(handlers::settings::get_settings).put(handlers::settings::save_settings),
         )
         // Update
-        .route("/api/update/check", get(handlers::update::update_check))
+        .route("/api/update/check", get(handlers::update::update_check));
+
+    // update_install — desktop-only
+    #[cfg(feature = "desktop")]
+    let router = router
         .route(
             "/api/update/install",
             post(handlers::update::update_install),
-        )
+        );
+
+    let router = router
         // Config
         .route(
             "/api/config/backup",
@@ -166,12 +177,18 @@ pub fn build_app_router(state: AdminState) -> Router {
         // Feedback
         .route("/api/feedback", post(handlers::feedback::submit_feedback))
         // Gemini CLI OAuth (login / status / logout)
-        .merge(handlers::gemini_oauth::routes())
-        // Plugin Unlock (CDP injection for Codex Desktop)
-        .merge(handlers::plugin_unlock::routes())
+        .merge(handlers::gemini_oauth::routes());
+
+    // Plugin Unlock — desktop-only
+    #[cfg(feature = "desktop")]
+    let router = router.merge(handlers::plugin_unlock::routes());
+
+    let router = router
         // Antigravity OAuth (login / status / logout / cancel)
         .merge(handlers::antigravity_oauth::routes())
         // 静态文件兜底
         .fallback(static_files::serve_static)
-        .with_state(state)
+        .with_state(state);
+
+    router
 }
